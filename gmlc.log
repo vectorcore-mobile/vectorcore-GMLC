@@ -1,0 +1,23 @@
+time=2026-07-30T06:55:08.922Z level=INFO msg="diameter registry starting" peers=2
+time=2026-07-30T06:55:08.923Z level=INFO msg="location request worker starting"
+time=2026-07-30T06:55:08.923Z level=INFO msg="diameter peer manager starting" peer=peer-1 address=127.0.0.1:3868 transport=tcp
+time=2026-07-30T06:55:08.923Z level=INFO msg="diameter connection attempt" peer=peer-1 address=127.0.0.1:3868 transport=tcp
+time=2026-07-30T06:55:08.923Z level=INFO msg="diameter peer manager starting" peer=peer-2 address=127.0.0.1:3869 transport=sctp
+time=2026-07-30T06:55:08.923Z level=INFO msg="diameter connection attempt" peer=peer-2 address=127.0.0.1:3869 transport=sctp
+time=2026-07-30T06:55:08.923Z level=INFO msg="gmlc listening" address=0.0.0.0:8086
+time=2026-07-30T06:55:08.923Z level=WARN msg="diameter connection failed; reconnect scheduled" peer=peer-1 address=127.0.0.1:3868 transport=tcp error="dial tcp 127.0.0.1:3868: connect: connection refused" delay=1s
+time=2026-07-30T06:55:08.924Z level=WARN msg="diameter connection failed; reconnect scheduled" peer=peer-2 address=127.0.0.1:3869 transport=sctp error="dial SCTP peer 127.0.0.1:3869: connection refused" delay=1s
+time=2026-07-30T06:55:09.924Z level=INFO msg="diameter connection attempt" peer=peer-2 address=127.0.0.1:3869 transport=sctp
+time=2026-07-30T06:55:09.924Z level=INFO msg="diameter connection attempt" peer=peer-1 address=127.0.0.1:3868 transport=tcp
+time=2026-07-30T06:55:09.924Z level=WARN msg="diameter connection failed; reconnect scheduled" peer=peer-2 address=127.0.0.1:3869 transport=sctp error="dial SCTP peer 127.0.0.1:3869: connection refused" delay=2s
+time=2026-07-30T06:55:09.924Z level=WARN msg="diameter connection failed; reconnect scheduled" peer=peer-1 address=127.0.0.1:3868 transport=tcp error="dial tcp 127.0.0.1:3868: connect: connection refused" delay=2s
+time=2026-07-30T06:55:11.925Z level=INFO msg="diameter connection attempt" peer=peer-2 address=127.0.0.1:3869 transport=sctp
+time=2026-07-30T06:55:11.925Z level=INFO msg="diameter connection attempt" peer=peer-1 address=127.0.0.1:3868 transport=tcp
+time=2026-07-30T06:55:11.925Z level=WARN msg="diameter connection failed; reconnect scheduled" peer=peer-2 address=127.0.0.1:3869 transport=sctp error="dial SCTP peer 127.0.0.1:3869: connection refused" delay=4s
+time=2026-07-30T06:55:11.925Z level=WARN msg="diameter connection failed; reconnect scheduled" peer=peer-1 address=127.0.0.1:3868 transport=tcp error="dial tcp 127.0.0.1:3868: connect: connection refused" delay=4s
+time=2026-07-30T06:55:15.451Z level=INFO msg="location request worker stopping"
+time=2026-07-30T06:55:15.451Z level=INFO msg="location request worker stopped"
+time=2026-07-30T06:55:15.451Z level=INFO msg="diameter registry stopping" peers=2
+time=2026-07-30T06:55:15.451Z level=INFO msg="diameter peer manager stopped" peer=peer-1 address=127.0.0.1:3868 transport=tcp
+time=2026-07-30T06:55:15.451Z level=INFO msg="diameter peer manager stopped" peer=peer-2 address=127.0.0.1:3869 transport=sctp
+time=2026-07-30T06:55:15.451Z level=INFO msg="diameter registry stopped"

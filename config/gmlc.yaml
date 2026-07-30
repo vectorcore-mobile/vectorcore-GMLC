@@ -1,0 +1,40 @@
+server:
+  listen_address: "0.0.0.0:8086"
+  shutdown_timeout: "10s"
+database:
+  path: "/var/lib/vectorcore/gmlc/gmlc.db"
+  busy_timeout: "5s"
+  synchronous: "FULL" # FULL, NORMAL, or OFF
+  checkpoint_pages: 1000
+retention:
+  request: "720h"
+  result: "168h"
+logging:
+  file: "gmlc.log"
+  level: "info"
+diameter:
+  # Diameter is mandatory. Peer capabilities are negotiated from CEA.
+  origin_host: "gmlc.epc.mnc435.mcc311.3gppnetwork.org"
+  origin_realm: "epc.mnc435.mcc311.3gppnetwork.org"
+  host_ip_address: "127.0.0.1"
+  connection_timeout: "5s"
+  request_timeout: "5s"
+  reconnect_min: "1s"
+  reconnect_max: "30s"
+  watchdog_interval: "5s"
+  watchdog_timeout: "5s"
+  shutdown_timeout: "10s"
+  peers:
+    - name: "peer-1"
+      address: "127.0.0.1:3868"
+      transport: "tcp"
+    - name: "peer-2"
+      address: "127.0.0.1:3869"
+      transport: "sctp"
+clients:
+  # The token is read only at bootstrap and stored as a SHA-256 hash. Supply it
+  # from protected deployment configuration, never source control.
+  - id: "example-lcs-client"
+    bearer_token: "replace-with-a-long-random-token"
+    services: ["immediate"]
+    target_prefixes: ["001", "311435"]
