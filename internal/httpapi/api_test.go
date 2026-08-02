@@ -85,6 +85,32 @@ func TestRESTAuthenticationIdempotencyAndCancel(t *testing.T) {
 	}
 }
 
+// TestWriteStatusResultShowsECGIOnlyCompletion is a regression test for a
+// bug where the "result" object was gated on Latitude/Longitude being
+// present, silently dropping ECGI-only (additional_information) and Polygon
+// completions from the API response even though the request genuinely
+// completed.
+func TestWriteStatusResultShowsECGIOnlyCompletion(t *testing.T) {
+	req := domain.Request{ID: "r1", State: domain.StateCompleted}
+	res := domain.Result{ECGI: []byte{1, 2, 3, 4, 5, 6, 7}}
+	w := httptest.NewRecorder()
+	writeStatusResult(w, 200, req, res)
+	var out struct {
+		Result map[string]any `json:"result"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &out); err != nil {
+		t.Fatal(err)
+	}
+	if out.Result == nil {
+		t.Fatalf("expected a result object for a completed ECGI-only request, got none: %s", w.Body.String())
+	}
+	if _, ok := out.Result["ecgi"]; !ok {
+		t.Fatalf("expected ecgi in result: %+v", out.Result)
+	}
+	if _, ok := out.Result["latitude"]; ok {
+		t.Fatalf("did not expect latitude for an ECGI-only result: %+v", out.Result)
+	}
+}
 func TestLeOperationalLogsAreRedacted(t *testing.T) {
 	previous := slog.Default()
 	defer slog.SetDefault(previous)

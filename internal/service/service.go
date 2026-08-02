@@ -12,7 +12,10 @@ import (
 	"github.com/vectorcore/gmlc/internal/storage"
 )
 
-var ErrIdempotencyRequired = errors.New("idempotency key is required")
+var (
+	ErrIdempotencyRequired = errors.New("idempotency key is required")
+	ErrUnsupportedService  = errors.New("unsupported service type")
+)
 
 type Service struct {
 	store    storage.Store
@@ -39,7 +42,7 @@ func (s *Service) Submit(ctx context.Context, in SubmitInput) (domain.Request, b
 		return domain.Request{}, false, err
 	}
 	if in.Service != "" && in.Service != domain.ServiceImmediate {
-		return domain.Request{}, false, fmt.Errorf("unsupported service type")
+		return domain.Request{}, false, fmt.Errorf("%q: %w", in.Service, ErrUnsupportedService)
 	}
 	in.Service = domain.ServiceImmediate
 	if strings.TrimSpace(in.IdempotencyKey) == "" || len(in.IdempotencyKey) > 255 {

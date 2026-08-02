@@ -15,7 +15,7 @@ import (
 	"syscall"
 	"time"
 
-	_ "github.com/mattn/go-sqlite3"
+	sqlite3 "github.com/mattn/go-sqlite3"
 	"github.com/vectorcore/gmlc/internal/domain"
 	"github.com/vectorcore/gmlc/internal/storage"
 )
@@ -132,7 +132,7 @@ func (s *Store) UpsertClient(ctx context.Context, c storage.Client) error {
 		return err
 	}
 	defer tx.Rollback()
-	_, err = tx.ExecContext(ctx, "INSERT INTO lcs_clients(id,credential_hash,enabled,created_at,updated_at) VALUES(?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET credential_hash=excluded.credential_hash,enabled=excluded.enabled,updated_at=excluded.updated_at", c.ID, c.CredentialHash, boolInt(c.Enabled), now, now)
+	_, err = tx.ExecContext(ctx, "INSERT INTO lcs_clients(id,credential_hash,enabled,lcs_client_type,created_at,updated_at) VALUES(?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET credential_hash=excluded.credential_hash,enabled=excluded.enabled,lcs_client_type=excluded.lcs_client_type,updated_at=excluded.updated_at", c.ID, c.CredentialHash, boolInt(c.Enabled), c.LCSClientType, now, now)
 	if err != nil {
 		return err
 	}
@@ -159,10 +159,15 @@ func boolInt(v bool) int {
 	}
 	return 0
 }
-func (s *Store) GetClient(ctx context.Context, id string) (storage.Client, error) {
+
+// GetClientCredential is a single fixed-cost query (indexed primary-key
+// lookup) regardless of whether id matches a row, and regardless of how
+// many services/prefixes that client has — see storage.Store for why that
+// matters on the pre-authentication path.
+func (s *Store) GetClientCredential(ctx context.Context, id string) (storage.Client, error) {
 	var c storage.Client
 	var enabled int
-	err := s.db.QueryRowContext(ctx, "SELECT id,credential_hash,enabled FROM lcs_clients WHERE id=?", id).Scan(&c.ID, &c.CredentialHash, &enabled)
+	err := s.db.QueryRowContext(ctx, "SELECT id,credential_hash,enabled,lcs_client_type FROM lcs_clients WHERE id=?", id).Scan(&c.ID, &c.CredentialHash, &enabled, &c.LCSClientType)
 	if errors.Is(err, sql.ErrNoRows) {
 		return c, storage.ErrNotFound
 	}
@@ -170,32 +175,41 @@ func (s *Store) GetClient(ctx context.Context, id string) (storage.Client, error
 		return c, err
 	}
 	c.Enabled = enabled == 1
+	return c, nil
+}
+func (s *Store) GetClientAuthzData(ctx context.Context, id string) ([]domain.ServiceType, []string, error) {
+	var services []domain.ServiceType
 	rows, err := s.db.QueryContext(ctx, "SELECT service FROM client_services WHERE client_id=?", id)
 	if err != nil {
-		return c, err
+		return nil, nil, err
 	}
-	defer rows.Close()
 	for rows.Next() {
 		var v string
 		if err = rows.Scan(&v); err != nil {
-			return c, err
+			rows.Close()
+			return nil, nil, err
 		}
-		c.Services = append(c.Services, domain.ServiceType(v))
+		services = append(services, domain.ServiceType(v))
+	}
+	if err = rows.Err(); err != nil {
+		rows.Close()
+		return nil, nil, err
 	}
 	rows.Close()
+	var prefixes []string
 	rows, err = s.db.QueryContext(ctx, "SELECT prefix FROM client_target_prefixes WHERE client_id=?", id)
 	if err != nil {
-		return c, err
+		return nil, nil, err
 	}
 	defer rows.Close()
 	for rows.Next() {
 		var v string
 		if err = rows.Scan(&v); err != nil {
-			return c, err
+			return nil, nil, err
 		}
-		c.TargetPrefixes = append(c.TargetPrefixes, v)
+		prefixes = append(prefixes, v)
 	}
-	return c, rows.Err()
+	return services, prefixes, rows.Err()
 }
 func (s *Store) CreateRequest(ctx context.Context, r domain.Request) (domain.Request, bool, error) {
 	now := time.Now().UTC()
@@ -205,11 +219,15 @@ func (s *Store) CreateRequest(ctx context.Context, r domain.Request) (domain.Req
 	if err == nil {
 		return r, true, nil
 	}
-	if !strings.Contains(err.Error(), "UNIQUE constraint failed: location_requests.client_id, location_requests.idempotency_key") {
+	if !isUniqueConstraintErr(err) {
 		return r, false, err
 	}
 	existing, e := s.byClientKey(ctx, r.ClientID, r.IdempotencyKey)
 	return existing, false, e
+}
+func isUniqueConstraintErr(err error) bool {
+	var e sqlite3.Error
+	return errors.As(err, &e) && e.Code == sqlite3.ErrConstraint
 }
 func (s *Store) byClientKey(ctx context.Context, c, k string) (domain.Request, error) {
 	var r domain.Request
@@ -357,7 +375,7 @@ func (s *Store) CompleteRequest(ctx context.Context, id string, v domain.Result)
 	if n != 1 {
 		return storage.ErrConflict
 	}
-	_, e = tx.ExecContext(ctx, "INSERT INTO location_results(request_id,raw_gad,shape,created_at,latitude,longitude,ecgi,source) VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(request_id) DO UPDATE SET raw_gad=excluded.raw_gad,shape=excluded.shape,created_at=excluded.created_at,latitude=excluded.latitude,longitude=excluded.longitude,ecgi=excluded.ecgi,source=excluded.source", id, v.RawGAD, v.Shape, utc(v.CreatedAt), v.Latitude, v.Longitude, v.ECGI, v.Source)
+	_, e = tx.ExecContext(ctx, "INSERT INTO location_results(request_id,raw_gad,shape,created_at,latitude,longitude,uncertainty_meters,semi_major_meters,semi_minor_meters,orientation_degrees,confidence_percent,age_of_location_estimate,accuracy_fulfilment,raw_velocity_estimate,eutran_positioning_data,ecgi,source) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(request_id) DO UPDATE SET raw_gad=excluded.raw_gad,shape=excluded.shape,created_at=excluded.created_at,latitude=excluded.latitude,longitude=excluded.longitude,uncertainty_meters=excluded.uncertainty_meters,semi_major_meters=excluded.semi_major_meters,semi_minor_meters=excluded.semi_minor_meters,orientation_degrees=excluded.orientation_degrees,confidence_percent=excluded.confidence_percent,age_of_location_estimate=excluded.age_of_location_estimate,accuracy_fulfilment=excluded.accuracy_fulfilment,raw_velocity_estimate=excluded.raw_velocity_estimate,eutran_positioning_data=excluded.eutran_positioning_data,ecgi=excluded.ecgi,source=excluded.source", id, v.RawGAD, v.Shape, utc(v.CreatedAt), v.Latitude, v.Longitude, v.UncertaintyMeters, v.SemiMajorMeters, v.SemiMinorMeters, v.OrientationDegrees, v.ConfidencePercent, v.AgeOfLocationEstimate, v.AccuracyFulfilment, v.RawVelocityEstimate, v.EUTRANPositioningData, v.ECGI, v.Source)
 	if e != nil {
 		return e
 	}
@@ -366,8 +384,9 @@ func (s *Store) CompleteRequest(ctx context.Context, id string, v domain.Result)
 func (s *Store) GetResult(ctx context.Context, id string) (domain.Result, error) {
 	var v domain.Result
 	var created string
-	var lat, lon sql.NullFloat64
-	err := s.db.QueryRowContext(ctx, "SELECT request_id,raw_gad,shape,created_at,latitude,longitude,ecgi,source FROM location_results WHERE request_id=?", id).Scan(&v.RequestID, &v.RawGAD, &v.Shape, &created, &lat, &lon, &v.ECGI, &v.Source)
+	var lat, lon, uncertainty, semiMajor, semiMinor, orientation sql.NullFloat64
+	var confidence, age, accuracy sql.NullInt64
+	err := s.db.QueryRowContext(ctx, "SELECT request_id,raw_gad,shape,created_at,latitude,longitude,uncertainty_meters,semi_major_meters,semi_minor_meters,orientation_degrees,confidence_percent,age_of_location_estimate,accuracy_fulfilment,raw_velocity_estimate,eutran_positioning_data,ecgi,source FROM location_results WHERE request_id=?", id).Scan(&v.RequestID, &v.RawGAD, &v.Shape, &created, &lat, &lon, &uncertainty, &semiMajor, &semiMinor, &orientation, &confidence, &age, &accuracy, &v.RawVelocityEstimate, &v.EUTRANPositioningData, &v.ECGI, &v.Source)
 	if errors.Is(err, sql.ErrNoRows) {
 		return v, storage.ErrNotFound
 	}
@@ -380,6 +399,30 @@ func (s *Store) GetResult(ctx context.Context, id string) (domain.Result, error)
 	}
 	if lon.Valid {
 		v.Longitude = &lon.Float64
+	}
+	if uncertainty.Valid {
+		v.UncertaintyMeters = &uncertainty.Float64
+	}
+	if semiMajor.Valid {
+		v.SemiMajorMeters = &semiMajor.Float64
+	}
+	if semiMinor.Valid {
+		v.SemiMinorMeters = &semiMinor.Float64
+	}
+	if orientation.Valid {
+		v.OrientationDegrees = &orientation.Float64
+	}
+	if confidence.Valid {
+		c := uint32(confidence.Int64)
+		v.ConfidencePercent = &c
+	}
+	if age.Valid {
+		a := uint32(age.Int64)
+		v.AgeOfLocationEstimate = &a
+	}
+	if accuracy.Valid {
+		a := uint32(accuracy.Int64)
+		v.AccuracyFulfilment = &a
 	}
 	return v, nil
 }
@@ -419,6 +462,11 @@ func (s *Store) Purge(ctx context.Context, requestBefore, resultBefore time.Time
 		return err
 	}
 	if _, err = tx.ExecContext(ctx, "DELETE FROM location_requests WHERE created_at < ? AND state IN (?,?,?,?,?)", utc(requestBefore), domain.StateCompleted, domain.StateFailed, domain.StateCancelled, domain.StateExpired, domain.StateIndeterminate); err != nil {
+		return err
+	}
+	// audit_events has no FK to location_requests (it must outlive a purged
+	// request as an audit trail), so it needs its own explicit retention cut.
+	if _, err = tx.ExecContext(ctx, "DELETE FROM audit_events WHERE created_at < ?", utc(requestBefore)); err != nil {
 		return err
 	}
 	return tx.Commit()

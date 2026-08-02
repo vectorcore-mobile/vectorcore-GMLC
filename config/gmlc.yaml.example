@@ -9,6 +9,7 @@ database:
 retention:
   request: "720h"
   result: "168h"
+  purge_interval: "1h" # optional; defaults to 1h if unset
 logging:
   file: "/var/log/vectorcore/gmlc.log"
   level: "info"
@@ -17,6 +18,12 @@ diameter:
   origin_host: "gmlc.epc.mnc435.mcc311.3gppnetwork.org"
   origin_realm: "epc.mnc435.mcc311.3gppnetwork.org"
   host_ip_address: "127.0.0.1"
+  # hss_realm/hss_host: where SLh Routing-Info-Requests are sent. Both are
+  # optional; hss_realm defaults to origin_realm (same-operator deployments
+  # where the GMLC and HSS share a realm). Set them explicitly for
+  # cross-realm/interconnect HSS routing.
+  # hss_realm: "epc.mnc435.mcc311.3gppnetwork.org"
+  # hss_host: "hss.epc.mnc435.mcc311.3gppnetwork.org"
   connection_timeout: "5s"
   request_timeout: "5s"
   reconnect_min: "1s"
@@ -38,3 +45,10 @@ clients:
     bearer_token: "replace-with-a-long-random-token"
     services: ["immediate"]
     target_prefixes: ["001", "311435"]
+    # lcs_client_type (TS 29.172 LCS-Client-Type, operator-set only — never
+    # exposed via the REST API): emergency_services, value_added_services
+    # (default), plmn_operator_services, lawful_intercept_services.
+    # emergency_services/lawful_intercept_services carry regulatory weight
+    # downstream at the MME/HSS; only assign them to clients you trust for
+    # that purpose.
+    lcs_client_type: "value_added_services"

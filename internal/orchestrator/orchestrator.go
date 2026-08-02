@@ -121,7 +121,20 @@ func (w *Worker) one(ctx context.Context) bool {
 		return true
 	}
 	slog.Debug("location request serving node resolved", "request_id", r.ID)
-	out, e := w.provider.ProvideLocation(c, n, domain.LocationRequest{Target: t, LocationType: 0, ClientType: 1, ClientName: r.ClientID})
+	// LCS-Client-Type is an operator-configured, per-client trust attribute
+	// (config.Client.LCSClientType), never caller-supplied: EMERGENCY_SERVICES
+	// and LAWFUL_INTERCEPT_SERVICES carry regulatory weight downstream, so
+	// only a trusted deployment config may grant them. Falls back to
+	// VALUE_ADDED_SERVICES, the prior hardcoded behavior, if the client
+	// record can't be read here (it was already required to exist to reach
+	// this point).
+	clientType := domain.ClientTypeValueAddedServices
+	if client, ce := w.store.GetClientCredential(c, r.ClientID); ce == nil {
+		clientType = client.LCSClientType
+	} else {
+		slog.Warn("client lookup failed; defaulting LCS-Client-Type to VALUE_ADDED_SERVICES", "request_id", r.ID, "client_id", r.ClientID)
+	}
+	out, e := w.provider.ProvideLocation(c, n, domain.LocationRequest{Target: t, LocationType: 0, ClientType: clientType, ClientName: r.ClientID})
 	if e != nil {
 		if c.Err() != nil {
 			slog.Debug("location request positioning interrupted", "request_id", r.ID)
@@ -131,17 +144,32 @@ func (w *Worker) one(ctx context.Context) bool {
 		w.handleError(r.ID, r.AttemptCount, domain.StateLocating, e)
 		return true
 	}
-	var lat, lon *float64
+	// A successful PLA carrying neither a location estimate nor additional
+	// information (deferred/no-immediate-result) must never complete the
+	// REST request — there is no positioning result to hand back.
+	if out.Kind == "no_immediate_result" || out.Kind == "deferred" {
+		slog.Warn("location request produced no immediate result", "request_id", r.ID, "kind", out.Kind)
+		_ = w.store.FailRequest(context.Background(), r.ID, domain.StateLocating, "no_immediate_result", "PLA returned no immediate positioning result")
+		return true
+	}
+	var lat, lon, uncertainty, semiMajor, semiMinor, orientation *float64
+	var confidence *uint32
+	shape := ""
 	if out.Position != nil {
 		lat = &out.Position.Latitude
 		lon = &out.Position.Longitude
+		uncertainty = out.Position.UncertaintyMeters
+		semiMajor = out.Position.SemiMajorMeters
+		semiMinor = out.Position.SemiMinorMeters
+		orientation = out.Position.OrientationDegrees
+		confidence = out.Position.ConfidencePercent
+		shape = out.Position.Shape
 	}
-	if e = w.store.CompleteRequest(c, r.ID, domain.Result{RequestID: r.ID, RawGAD: out.RawLocationEstimate, Shape: func() string {
-		if out.Position != nil {
-			return out.Position.Shape
-		}
-		return ""
-	}(), Latitude: lat, Longitude: lon, ECGI: out.ECGI, CreatedAt: time.Now(), Source: n.Source}); e != nil {
+	// AgeOfLocationEstimate/AccuracyFulfilment/RawVelocityEstimate/
+	// EUTRANPositioningData are independent of Position (they can accompany
+	// an ECGI-only PLA too), so they're read from out directly, not out.Position.
+	result := domain.Result{RequestID: r.ID, RawGAD: out.RawLocationEstimate, Shape: shape, Latitude: lat, Longitude: lon, UncertaintyMeters: uncertainty, SemiMajorMeters: semiMajor, SemiMinorMeters: semiMinor, OrientationDegrees: orientation, ConfidencePercent: confidence, AgeOfLocationEstimate: out.AgeOfLocationEstimate, AccuracyFulfilment: out.AccuracyFulfilment, RawVelocityEstimate: out.RawVelocityEstimate, EUTRANPositioningData: out.EUTRANPositioningData, ECGI: out.ECGI, CreatedAt: time.Now(), Source: n.Source}
+	if e = w.store.CompleteRequest(c, r.ID, result); e != nil {
 		slog.Warn("location request completion not applied", "request_id", r.ID)
 		return true
 	}

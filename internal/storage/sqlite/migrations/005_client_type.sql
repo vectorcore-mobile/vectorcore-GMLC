@@ -1,0 +1,1 @@
+ALTER TABLE lcs_clients ADD COLUMN lcs_client_type INTEGER NOT NULL DEFAULT 1;

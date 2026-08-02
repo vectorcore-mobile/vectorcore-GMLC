@@ -122,8 +122,45 @@ func writeStatus(w http.ResponseWriter, status int, r domain.Request) {
 }
 func writeStatusResult(w http.ResponseWriter, status int, r domain.Request, v domain.Result) {
 	out := map[string]any{"id": r.ID, "service_type": r.Service, "state": r.State, "failure_code": r.FailureCode, "created_at": r.CreatedAt, "updated_at": r.UpdatedAt}
-	if r.State == domain.StateCompleted && v.Latitude != nil && v.Longitude != nil {
-		out["result"] = map[string]any{"shape": v.Shape, "latitude": *v.Latitude, "longitude": *v.Longitude, "created_at": v.CreatedAt, "ecgi": v.ECGI}
+	// A completed request always has a result row, but not every completion
+	// has a position — additional_information (ECGI-only) and Polygon
+	// (no single center point) completions don't. Gating on Latitude/
+	// Longitude here would silently drop those results from the response
+	// even though the request genuinely completed.
+	if r.State == domain.StateCompleted {
+		result := map[string]any{"created_at": v.CreatedAt}
+		if v.Shape != "" {
+			result["shape"] = v.Shape
+		}
+		if v.Latitude != nil && v.Longitude != nil {
+			result["latitude"] = *v.Latitude
+			result["longitude"] = *v.Longitude
+		}
+		if len(v.ECGI) > 0 {
+			result["ecgi"] = v.ECGI
+		}
+		if v.UncertaintyMeters != nil {
+			result["uncertainty_meters"] = *v.UncertaintyMeters
+		}
+		if v.SemiMajorMeters != nil {
+			result["semi_major_meters"] = *v.SemiMajorMeters
+		}
+		if v.SemiMinorMeters != nil {
+			result["semi_minor_meters"] = *v.SemiMinorMeters
+		}
+		if v.OrientationDegrees != nil {
+			result["orientation_degrees"] = *v.OrientationDegrees
+		}
+		if v.ConfidencePercent != nil {
+			result["confidence_percent"] = *v.ConfidencePercent
+		}
+		if v.AgeOfLocationEstimate != nil {
+			result["age_of_location_estimate_minutes"] = *v.AgeOfLocationEstimate
+		}
+		if v.AccuracyFulfilment != nil {
+			result["accuracy_fulfilment"] = *v.AccuracyFulfilment
+		}
+		out["result"] = result
 	}
 	write(w, status, out)
 }
@@ -135,6 +172,11 @@ func write(w http.ResponseWriter, status int, v any) {
 func problem(w http.ResponseWriter, status int, code, detail string) {
 	write(w, status, map[string]any{"error": map[string]string{"code": code, "detail": detail}})
 }
+
+// mapErr translates service/storage errors to HTTP responses. Only errors
+// known to originate from client-supplied input are safe to echo back to the
+// caller; anything else (unexpected storage/backend failures) must map to a
+// generic 500 so internal error text is never disclosed to an API client.
 func mapErr(w http.ResponseWriter, err error) {
 	switch {
 	case errors.Is(err, auth.ErrUnauthenticated):
@@ -147,8 +189,12 @@ func mapErr(w http.ResponseWriter, err error) {
 		problem(w, 409, "invalid_state", "operation is not valid for request state")
 	case errors.Is(err, service.ErrIdempotencyRequired):
 		problem(w, 400, "idempotency_required", "Idempotency-Key is required")
+	case errors.Is(err, domain.ErrInvalidTarget):
+		problem(w, 400, "invalid_target", err.Error())
+	case errors.Is(err, service.ErrUnsupportedService):
+		problem(w, 400, "unsupported_service_type", err.Error())
 	default:
-		problem(w, 400, "invalid_request", err.Error())
+		problem(w, 500, "internal_error", "the request could not be completed")
 	}
 }
 
@@ -166,7 +212,11 @@ func safeErrorCode(err error) string {
 		return "invalid_state"
 	case errors.Is(err, service.ErrIdempotencyRequired):
 		return "idempotency_required"
+	case errors.Is(err, domain.ErrInvalidTarget):
+		return "invalid_target"
+	case errors.Is(err, service.ErrUnsupportedService):
+		return "unsupported_service_type"
 	default:
-		return "invalid_request"
+		return "internal_error"
 	}
 }

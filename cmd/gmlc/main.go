@@ -58,7 +58,7 @@ func main() {
 		os.Exit(1)
 	}
 	for _, c := range cfg.Clients {
-		if err = st.UpsertClient(ctx, storage.Client{ID: c.ID, CredentialHash: auth.HashToken(c.BearerToken), Enabled: true, Services: c.Services, TargetPrefixes: c.TargetPrefixes}); err != nil {
+		if err = st.UpsertClient(ctx, storage.Client{ID: c.ID, CredentialHash: auth.HashToken(c.BearerToken), Enabled: true, Services: c.Services, TargetPrefixes: c.TargetPrefixes, LCSClientType: c.ClientTypeValue()}); err != nil {
 			slog.Error("client bootstrap failed", "client_id", c.ID, "error", err)
 			os.Exit(1)
 		}
@@ -71,6 +71,9 @@ func main() {
 		slog.Error("retention purge failed", "error", err)
 		os.Exit(1)
 	}
+	purgeDone := make(chan struct{})
+	purgeStop := make(chan struct{})
+	go runRetentionPurge(st, cfg.Retention, purgeStop, purgeDone)
 	t := vcdiam.RegistryConfig{OriginHost: cfg.Diameter.OriginHost, OriginRealm: cfg.Diameter.OriginRealm, HostIP: net.ParseIP(cfg.Diameter.HostIPAddress), ConnectTimeout: cfg.Diameter.ConnectionTimeout, ReconnectMin: cfg.Diameter.ReconnectMin, ReconnectMax: cfg.Diameter.ReconnectMax, WatchdogInterval: cfg.Diameter.WatchdogInterval, WatchdogTimeout: cfg.Diameter.WatchdogTimeout}
 	for _, p := range cfg.Diameter.Peers {
 		t.Peers = append(t.Peers, vcdiam.PeerConfig{Name: p.Name, Address: p.Address, Transport: p.Transport, ExpectedOriginHost: p.ExpectedOriginHost, ExpectedOriginRealm: p.ExpectedOriginRealm})
@@ -78,7 +81,7 @@ func main() {
 	registry := vcdiam.BuildRegistry(t)
 	registry.Start()
 	svc := service.New(st, auth.New(st))
-	resolver, err := slh.NewWithRegistry(slh.Config{OriginHost: cfg.Diameter.OriginHost, OriginRealm: cfg.Diameter.OriginRealm, DestinationRealm: cfg.Diameter.OriginRealm, RequestTimeout: cfg.Diameter.RequestTimeout}, registry)
+	resolver, err := slh.NewWithRegistry(slh.Config{OriginHost: cfg.Diameter.OriginHost, OriginRealm: cfg.Diameter.OriginRealm, DestinationRealm: cfg.Diameter.HSSRealm, DestinationHost: cfg.Diameter.HSSHost, RequestTimeout: cfg.Diameter.RequestTimeout}, registry)
 	if err != nil {
 		slog.Error("SLh setup failed", "error", err)
 		os.Exit(1)
@@ -104,8 +107,34 @@ func main() {
 	<-sig
 	stop, cancel := context.WithTimeout(context.Background(), cfg.Server.ShutdownTimeout)
 	defer cancel()
+	close(purgeStop)
 	_ = server.Shutdown(stop)
 	_ = worker.Close(stop)
 	_ = registry.Close(stop)
+	select {
+	case <-purgeDone:
+	case <-stop.Done():
+	}
 	_ = st.Close(stop)
+}
+
+// runRetentionPurge enforces the configured retention window on a recurring
+// basis. A one-shot purge at startup is not enough: a long-running process
+// would otherwise retain subscriber location data past its configured
+// retention window until its next restart.
+func runRetentionPurge(st storage.Store, r config.Retention, stop <-chan struct{}, done chan<- struct{}) {
+	defer close(done)
+	t := time.NewTicker(r.PurgeInterval)
+	defer t.Stop()
+	for {
+		select {
+		case <-stop:
+			return
+		case <-t.C:
+			now := time.Now().UTC()
+			if err := st.Purge(context.Background(), now.Add(-r.Request), now.Add(-r.Result)); err != nil {
+				slog.Warn("retention purge failed", "error", err)
+			}
+		}
+	}
 }

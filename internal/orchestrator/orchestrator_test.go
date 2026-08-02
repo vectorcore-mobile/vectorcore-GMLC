@@ -40,6 +40,31 @@ func (f fakeProvider) ProvideLocation(c context.Context, n domain.ServingNode, r
 	lat, lon := 1.0, 2.0
 	return domain.PositioningResult{RawLocationEstimate: []byte{0, 0, 0, 0, 0, 0, 0}, ECGI: []byte{1}, Position: &domain.GeographicPosition{Shape: "ellipsoid_point", Latitude: lat, Longitude: lon}}, nil
 }
+
+type noResultProvider struct{}
+
+func (noResultProvider) ProvideLocation(c context.Context, n domain.ServingNode, r domain.LocationRequest) (domain.PositioningResult, error) {
+	return domain.PositioningResult{Kind: "no_immediate_result"}, nil
+}
+
+// ecgiOnlyProvider mimics a real "additional_information" PLA outcome: ECGI
+// but no decoded Location-Estimate, so RawLocationEstimate/Position are both
+// zero-value. This previously stranded requests forever: CompleteRequest's
+// INSERT violated location_results.raw_gad's NOT NULL constraint, silently
+// failing and leaving the request stuck in "locating" with no retry path.
+type ecgiOnlyProvider struct{}
+
+func (ecgiOnlyProvider) ProvideLocation(c context.Context, n domain.ServingNode, r domain.LocationRequest) (domain.PositioningResult, error) {
+	return domain.PositioningResult{Kind: "additional_information", ECGI: []byte{1, 2, 3, 4, 5, 6, 7}}, nil
+}
+
+type capturingProvider struct{ got chan domain.LocationRequest }
+
+func (p capturingProvider) ProvideLocation(c context.Context, n domain.ServingNode, r domain.LocationRequest) (domain.PositioningResult, error) {
+	p.got <- r
+	lat, lon := 1.0, 2.0
+	return domain.PositioningResult{RawLocationEstimate: []byte{0, 0, 0, 0, 0, 0, 0}, Position: &domain.GeographicPosition{Shape: "ellipsoid_point", Latitude: lat, Longitude: lon}}, nil
+}
 func store(t *testing.T) *sqlite.Store {
 	t.Helper()
 	s, e := sqlite.Open(context.Background(), sqlite.Config{Path: filepath.Join(t.TempDir(), "x.db")})
@@ -108,6 +133,15 @@ func TestWorkerSuccessRetryAndCancellation(t *testing.T) {
 		t.Fatal(r.AttemptCount)
 	}
 	_ = w.Close(context.Background())
+	queued(t, s, "no-result")
+	w = New(s, fakeResolver{}, noResultProvider{})
+	w.Start(context.Background())
+	w.Notify()
+	waitState(t, s, "no-result", domain.StateFailed)
+	if r, e := s.GetRequest(context.Background(), "no-result"); e != nil || r.FailureCode != "no_immediate_result" {
+		t.Fatalf("%+v %v", r, e)
+	}
+	_ = w.Close(context.Background())
 	queued(t, s, "cancel")
 	w = New(s, fakeResolver{block: true}, fakeProvider{})
 	w.Start(context.Background())
@@ -119,4 +153,48 @@ func TestWorkerSuccessRetryAndCancellation(t *testing.T) {
 	w.Cancel("cancel")
 	waitState(t, s, "cancel", domain.StateCancelled)
 	_ = w.Close(context.Background())
+}
+func TestWorkerUsesClientConfiguredLCSClientType(t *testing.T) {
+	s := store(t)
+	defer s.Close(context.Background())
+	if e := s.UpsertClient(context.Background(), storage.Client{ID: "plmn-client", CredentialHash: []byte("x"), Enabled: true, LCSClientType: domain.ClientTypePLMNOperatorServices}); e != nil {
+		t.Fatal(e)
+	}
+	if _, _, e := s.CreateRequest(context.Background(), domain.Request{ID: "req", ClientID: "plmn-client", IdempotencyKey: "req", TargetKind: "imsi", TargetValue: "001010123456789", State: domain.StateQueued}); e != nil {
+		t.Fatal(e)
+	}
+	cp := capturingProvider{got: make(chan domain.LocationRequest, 1)}
+	w := New(s, fakeResolver{}, cp)
+	w.Start(context.Background())
+	w.Notify()
+	select {
+	case r := <-cp.got:
+		if r.ClientType != domain.ClientTypePLMNOperatorServices {
+			t.Fatalf("expected ClientType=%d (PLMN operator), got %d", domain.ClientTypePLMNOperatorServices, r.ClientType)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("provider not invoked")
+	}
+	waitState(t, s, "req", domain.StateCompleted)
+	_ = w.Close(context.Background())
+}
+func TestWorkerCompletesECGIOnlyResult(t *testing.T) {
+	s := store(t)
+	defer s.Close(context.Background())
+	queued(t, s, "ecgi-only")
+	w := New(s, fakeResolver{}, ecgiOnlyProvider{})
+	w.Start(context.Background())
+	defer w.Close(context.Background())
+	w.Notify()
+	waitState(t, s, "ecgi-only", domain.StateCompleted)
+	v, e := s.GetResult(context.Background(), "ecgi-only")
+	if e != nil {
+		t.Fatal(e)
+	}
+	if string(v.ECGI) != "\x01\x02\x03\x04\x05\x06\x07" {
+		t.Fatalf("ECGI not stored: %+v", v)
+	}
+	if v.Latitude != nil || v.Longitude != nil {
+		t.Fatalf("expected no position for ECGI-only result: %+v", v)
+	}
 }

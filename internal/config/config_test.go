@@ -61,3 +61,59 @@ func TestDiameterPeerConfiguration(t *testing.T) {
 		t.Error("empty peers accepted")
 	}
 }
+func TestHSSRealmDefaultsAndOverride(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "gmlc.yaml")
+	if err := os.WriteFile(p, []byte(validDiameter("    - {name: a, address: 'a:1', transport: tcp}\n")), 0600); err != nil {
+		t.Fatal(err)
+	}
+	c, err := Load(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Diameter.HSSRealm != c.Diameter.OriginRealm {
+		t.Fatalf("expected HSSRealm to default to OriginRealm, got %q vs %q", c.Diameter.HSSRealm, c.Diameter.OriginRealm)
+	}
+	text := strings.Replace(validDiameter("    - {name: a, address: 'a:1', transport: tcp}\n"), "  host_ip_address: 127.0.0.1\n", "  host_ip_address: 127.0.0.1\n  hss_realm: hss-realm.example\n  hss_host: hss.example\n", 1)
+	p2 := filepath.Join(t.TempDir(), "gmlc2.yaml")
+	if err := os.WriteFile(p2, []byte(text), 0600); err != nil {
+		t.Fatal(err)
+	}
+	c2, err := Load(p2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c2.Diameter.HSSRealm != "hss-realm.example" || c2.Diameter.HSSHost != "hss.example" {
+		t.Fatalf("explicit hss_realm/hss_host not honored: %+v", c2.Diameter)
+	}
+}
+func TestClientTypeDefaultAndValues(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "gmlc.yaml")
+	if err := os.WriteFile(p, []byte(validDiameter("    - {name: a, address: 'a:1', transport: tcp}\n")), 0600); err != nil {
+		t.Fatal(err)
+	}
+	c, err := Load(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Clients[0].LCSClientType != "value_added_services" || c.Clients[0].ClientTypeValue() != 1 {
+		t.Fatalf("expected default value_added_services, got %+v", c.Clients[0])
+	}
+	for name, want := range map[string]uint32{"emergency_services": 0, "value_added_services": 1, "plmn_operator_services": 2, "lawful_intercept_services": 3} {
+		text := strings.Replace(validDiameter("    - {name: a, address: 'a:1', transport: tcp}\n"), "target_prefixes: [\"1\"]}]", "target_prefixes: [\"1\"], lcs_client_type: "+name+"}]", 1)
+		p2 := filepath.Join(t.TempDir(), "gmlc.yaml")
+		if err := os.WriteFile(p2, []byte(text), 0600); err != nil {
+			t.Fatal(err)
+		}
+		c2, err := Load(p2)
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if got := c2.Clients[0].ClientTypeValue(); got != want {
+			t.Fatalf("%s: got %d, want %d", name, got, want)
+		}
+	}
+	invalid := strings.Replace(validDiameter("    - {name: a, address: 'a:1', transport: tcp}\n"), "target_prefixes: [\"1\"]}]", "target_prefixes: [\"1\"], lcs_client_type: bogus}]", 1)
+	if err := loadText(t, invalid); err == nil {
+		t.Fatal("invalid lcs_client_type accepted")
+	}
+}

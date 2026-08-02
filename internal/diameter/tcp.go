@@ -123,6 +123,14 @@ func dialTransport(ctx context.Context, c TransportConfig) (*tcpRT, error) {
 		go rt.watch()
 		return rt, nil
 	case <-ctx.Done():
+		// The dial goroutine may still be in flight and later succeed; if it
+		// does, nobody else will ever observe or close that connection, so
+		// drain it here to avoid leaking a live socket.
+		go func() {
+			if x := <-done; x.err == nil && x.c != nil {
+				x.c.Close()
+			}
+		}()
 		return nil, ctx.Err()
 	}
 }

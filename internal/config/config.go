@@ -27,6 +27,8 @@ type Diameter struct {
 	OriginHost        string         `yaml:"origin_host"`
 	OriginRealm       string         `yaml:"origin_realm"`
 	HostIPAddress     string         `yaml:"host_ip_address"`
+	HSSRealm          string         `yaml:"hss_realm"`
+	HSSHost           string         `yaml:"hss_host"`
 	ConnectionTimeout time.Duration  `yaml:"connection_timeout"`
 	RequestTimeout    time.Duration  `yaml:"request_timeout"`
 	ReconnectMin      time.Duration  `yaml:"reconnect_min"`
@@ -54,15 +56,35 @@ type Database struct {
 	CheckpointPages int           `yaml:"checkpoint_pages"`
 }
 type Retention struct {
-	Request time.Duration `yaml:"request"`
-	Result  time.Duration `yaml:"result"`
+	Request       time.Duration `yaml:"request"`
+	Result        time.Duration `yaml:"result"`
+	PurgeInterval time.Duration `yaml:"purge_interval"`
 }
 type Client struct {
 	ID             string               `yaml:"id"`
 	BearerToken    string               `yaml:"bearer_token"`
 	Services       []domain.ServiceType `yaml:"services"`
 	TargetPrefixes []string             `yaml:"target_prefixes"`
+	// LCSClientType selects the TS 29.172 LCS-Client-Type this client's
+	// requests are tagged with. Operator-controlled only — never settable via
+	// the REST API — since EMERGENCY_SERVICES/LAWFUL_INTERCEPT_SERVICES carry
+	// regulatory weight downstream. One of: emergency_services,
+	// value_added_services (default), plmn_operator_services,
+	// lawful_intercept_services.
+	LCSClientType string `yaml:"lcs_client_type"`
 }
+
+var clientTypeValues = map[string]uint32{
+	"emergency_services":        domain.ClientTypeEmergencyServices,
+	"value_added_services":      domain.ClientTypeValueAddedServices,
+	"plmn_operator_services":    domain.ClientTypePLMNOperatorServices,
+	"lawful_intercept_services": domain.ClientTypeLawfulIntercept,
+}
+
+// ClientTypeValue resolves the configured LCSClientType name to its TS
+// 29.172 numeric value. LCSClientType is validated by Config.Validate, so
+// this is only called on an already-validated config.
+func (c Client) ClientTypeValue() uint32 { return clientTypeValues[c.LCSClientType] }
 
 func Load(path string) (Config, error) {
 	b, err := os.ReadFile(path)
@@ -93,6 +115,20 @@ func (c *Config) applyDefaults() {
 	}
 	if c.Logging.Level == "" {
 		c.Logging.Level = "info"
+	}
+	if c.Retention.PurgeInterval <= 0 {
+		c.Retention.PurgeInterval = time.Hour
+	}
+	// HSS realm defaults to the GMLC's own realm, matching the common
+	// same-operator deployment where GMLC and HSS share a Diameter realm.
+	// diameter.hss_realm lets cross-realm/interconnect deployments override it.
+	if c.Diameter.HSSRealm == "" {
+		c.Diameter.HSSRealm = c.Diameter.OriginRealm
+	}
+	for i := range c.Clients {
+		if c.Clients[i].LCSClientType == "" {
+			c.Clients[i].LCSClientType = "value_added_services"
+		}
 	}
 }
 func (c Config) Validate() error {
@@ -155,6 +191,9 @@ func (c Config) Validate() error {
 			if strings.Trim(p, "0123456789") != "" {
 				return fmt.Errorf("client %q prefix is not numeric", v.ID)
 			}
+		}
+		if _, ok := clientTypeValues[v.LCSClientType]; !ok {
+			return fmt.Errorf("client %q has invalid lcs_client_type %q", v.ID, v.LCSClientType)
 		}
 	}
 	return nil

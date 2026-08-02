@@ -71,11 +71,32 @@ storage interface is intentionally SQL-neutral; PostgreSQL is deferred.
 Planned schema boundaries not yet implemented are deferred subscriptions,
 delivery outbox/attempts, and encrypted callback secrets.
 
-Phase 4A decodes TS 23.032 GAD Ellipsoid Point only (shape type 0). Raw
-Location-Estimate bytes remain available for diagnostics; unsupported shapes
-fail explicitly. GAD is compact binary, not ASN.1. Live multi-peer routing,
-relay fallback, mixed TCP/SCTP deployments, and prolonged watchdog/reconnect
-operation remain lab-validation work rather than development blockers.
+Phase 4A decodes TS 23.032 V16.1.0 GAD Ellipsoid Point (0x0), Ellipsoid Point
+with Uncertainty Circle (0x1), Ellipsoid Point with Uncertainty Ellipse
+(0x3), and Polygon (0x5) — the shapes covering the large majority of
+Cell-ID/E-CID/OTDOA positioning; altitude variants, arc, and high-accuracy
+shapes remain unsupported and fail explicitly. The shape type is the low
+nibble of octet 1 (`docs/specs/ts_23032_rel16.txt` Table 2a); Polygon's high
+nibble instead carries its point count (3-15), and its own bit values are
+sparse (e.g. Polygon = 0x5, not 4) — distinct from the sequential bit
+numbering used by the unrelated Supported-GAD-Shapes AVP bitmask. Polygon
+has no single center point, so it never populates `GeographicPosition`; the
+raw Location-Estimate bytes are retained for diagnostics rather than
+fabricating a misleading coordinate. Ellipse populates the center point plus
+semi-major/semi-minor/orientation/confidence. Raw Location-Estimate bytes
+always remain available regardless of shape. GAD is compact binary, not
+ASN.1. Live multi-peer routing, relay fallback, mixed TCP/SCTP deployments,
+and prolonged watchdog/reconnect operation remain lab-validation work rather
+than development blockers.
+
+A successful PLA that resolves to a `no_immediate_result`/`deferred` outcome
+(no Location-Estimate, no ECGI) never completes a REST request; the
+orchestrator fails it explicitly with `no_immediate_result` instead. SLh
+routes to `diameter.hss_realm`/`diameter.hss_host` (defaulting to the GMLC's
+own realm for same-operator deployments) rather than assuming the HSS shares
+the GMLC's realm. `retention.purge_interval` (default 1h) enforces the
+retention window on a recurring basis, not only at startup, and purge also
+clears `audit_events` past `retention.request`.
 
 Phase 4B.1 adds durable queue primitives: SQLite atomically claims due queued
 requests, records attempts/next-attempt metadata, moves a resolving request to
@@ -95,3 +116,55 @@ REST request JSON. Run `make fuzz-smoke` for a bounded pass (`FUZZ_TIME=30s`
 overrides it); longer focused runs use the corresponding `go test -fuzz` target.
 Intentional regression seeds belong beside their package fuzz tests. Fuzzing
 supplements unit tests and lab interoperability testing.
+
+Phase 4D verifies the SLg wire format against 3GPP TS 29.172 V16.1.0
+(Release 16; `docs/specs/ts_29172_rel16.txt`, extracted from the 3GPP archive
+`29172-g10.docx`) rather than assumption. LCS-EPS-Client-Name (2501) and
+LCS-Requestor-Name (2502) are `[LCS-Name-String]`/`[LCS-Requestor-Id-String]`
++ `[LCS-Format-Indicator]` only — no LCS-Data-Coding-Scheme child, correcting
+an earlier implementation that wrongly borrowed the TS 32.299 Rf/Ro
+LCS-Client-Name shape. PLR also carries LCS-Priority (2503), Velocity-
+Requested (2508), LCS-Service-Type-ID (2520), and Supported-GAD-Shapes
+(2510) — a bitmask declaring the TS 23.032 shapes this GMLC can decode
+(bits 0-3: point, circle, ellipse, polygon — kept in sync with
+`internal/gad`'s supported shapes), so the network isn't invited to return
+shapes it can't parse. PLA decoding now also captures Accuracy-Fulfilment-Indicator (2513),
+Age-Of-Location-Estimate (2514), Velocity-Estimate (2515), and
+EUTRAN-Positioning-Data (2516). `docs/specs/` holds the Release 16 source
+documents (`.doc`/`.docx`) plus extracted text for the three governing specs
+(TS 29.172, TS 29.173, TS 23.032) as the reference for any future AVP work —
+check codes there before adding new wire fields rather than assuming.
+
+LCS-Client-Type (TS 29.172 7.4, reused from TS 32.299) is an
+operator-configured, per-client attribute (`clients[].lcs_client_type` in
+config, defaulting to `value_added_services`) resolved at dispatch time via
+the client's stored record — never caller-supplied over the REST API, since
+`emergency_services`/`lawful_intercept_services` carry regulatory weight
+(e.g. privacy-check bypass) at the MME/HSS.
+
+`auth.Authenticate` is timing-safe against client-ID enumeration.
+`Store.GetClientCredential` is a single fixed-cost query (independent of
+whether the ID matches, and of how many services/prefixes that client has)
+used for the credential check; the constant-time compare always runs
+against it, using a fixed dummy hash when the client doesn't exist or is
+disabled, so a failure never short-circuits before the compare. The
+variable-cost `Store.GetClientAuthzData` lookup (services/prefixes) only
+runs after a token has already been verified — timing there leaks nothing
+an attacker didn't already need a valid credential to reach.
+
+`location_results.raw_gad` was `NOT NULL` since the original schema, but an
+`additional_information` (ECGI-only) PLA outcome has no Location-Estimate to
+store — `CompleteRequest` always sent `NULL` for it, silently violating the
+constraint and permanently stranding those requests in `locating` (never
+retried, never failed). Migration `008_raw_gad_nullable.sql` recreates the
+table with `raw_gad` nullable. `Age-Of-Location-Estimate` (2514) and
+`Accuracy-Fulfilment-Indicator` (2513) are independent of Position — an
+ECGI-only or Polygon completion can still carry them — so they're read from
+the PLA result directly rather than gated behind a decoded position;
+`Velocity-Estimate` (2515) and `EUTRAN-Positioning-Data` (2516) are kept as
+undecoded bytes, like `raw_gad`, for diagnostics rather than structured API
+exposure. The REST `result` object itself was gated on
+Latitude/Longitude being present, which silently dropped ECGI-only and
+Polygon completions from the API response even though the request
+genuinely completed; it's now gated on request state alone, with each field
+inside it independently optional.

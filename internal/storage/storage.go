@@ -19,6 +19,10 @@ type Client struct {
 	Services       []domain.ServiceType
 	TargetPrefixes []string
 	Enabled        bool
+	// LCSClientType is the TS 29.172 LCS-Client-Type this client's requests
+	// are tagged with (domain.ClientType* constants). Operator-configured
+	// only; see config.Client.LCSClientType.
+	LCSClientType uint32
 }
 type AuditEvent struct {
 	RequestID, ClientID, Type, Detail string
@@ -28,7 +32,15 @@ type AuditEvent struct {
 type Store interface {
 	Migrate(context.Context) error
 	UpsertClient(context.Context, Client) error
-	GetClient(context.Context, string) (Client, error)
+	// GetClientCredential returns identity/credential/type only (one
+	// fixed-cost query, independent of how many services/prefixes the
+	// client has), so callers on the pre-authentication path — where an
+	// attacker without a valid token can be probing — don't leak client
+	// existence through query cost. Authorization data is fetched
+	// separately via GetClientAuthzData, only once a token has already
+	// been verified.
+	GetClientCredential(context.Context, string) (Client, error)
+	GetClientAuthzData(context.Context, string) (services []domain.ServiceType, targetPrefixes []string, err error)
 	CreateRequest(context.Context, domain.Request) (domain.Request, bool, error)
 	GetRequest(context.Context, string) (domain.Request, error)
 	TransitionRequest(context.Context, string, domain.State, string) (domain.Request, error)
