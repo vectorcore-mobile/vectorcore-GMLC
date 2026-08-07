@@ -179,15 +179,15 @@ func (w *Worker) one(ctx context.Context) bool {
 func (w *Worker) handleError(id string, attempts int, from domain.State, e error) {
 	if errors.Is(e, diameter.ErrUnavailable) || errors.Is(e, diameter.ErrConnectionLost) || errors.Is(e, context.DeadlineExceeded) {
 		if attempts >= maxAttempts {
-			slog.Warn("location request retry budget exhausted", "request_id", id, "attempt", attempts, "failure_code", "temporarily_unavailable")
+			slog.Warn("location request retry budget exhausted", "request_id", id, "attempt", attempts, "failure_code", "temporarily_unavailable", "error", e)
 			_ = w.store.FailRequest(context.Background(), id, from, "temporarily_unavailable", "location service temporarily unavailable")
 			return
 		}
 		delay := time.Second * time.Duration(1<<(attempts-1))
-		slog.Warn("location request transient failure; retry scheduled", "request_id", id, "attempt", attempts, "delay", delay, "failure_code", "temporarily_unavailable")
+		slog.Warn("location request transient failure; retry scheduled", "request_id", id, "attempt", attempts, "delay", delay, "failure_code", "temporarily_unavailable", "error", e)
 		_ = w.store.Requeue(context.Background(), id, from, time.Now().Add(delay), "temporarily_unavailable")
 		return
 	}
-	slog.Warn("location request failed", "request_id", id, "failure_code", "network_failure")
+	slog.Warn("location request failed", "request_id", id, "failure_code", "network_failure", "error", e)
 	_ = w.store.FailRequest(context.Background(), id, from, "network_failure", "location request failed")
 }

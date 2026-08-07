@@ -73,8 +73,16 @@ func dialTransport(ctx context.Context, c TransportConfig) (*tcpRT, error) {
 	rt := &tcpRT{pending: map[uint32]chan result{}, closed: make(chan struct{})}
 	settings := &sm.Settings{OriginHost: datatype.DiameterIdentity(c.OriginHost), OriginRealm: datatype.DiameterIdentity(c.OriginRealm), VendorID: datatype.Unsigned32(VendorID), ProductName: datatype.UTF8String(ProductName), HostIPAddresses: []datatype.Address{datatype.Address(c.HostIP)}}
 	machine := sm.New(settings)
-	machine.HandleIdx(diam.CommandIndex{AppID: 0, Code: 0, Request: false}, diam.HandlerFunc(func(_ diam.Conn, m *diam.Message) { rt.deliver(m) }))
-	// Application answers are caught by a wildcard ServeMux handler registered by command index below.
+	// {0,0,false} is not the library's wildcard sentinel — diam.ALL_CMD_INDEX
+	// ({^0,^0,false}, see diam/server.go) is. An answer whose application
+	// isn't in dict.Default fails ServeMux's FindCommand lookup and falls
+	// through to ALL_CMD_INDEX before ever reaching the exact-match handlers
+	// registered below; without this, that fallback finds nothing and the
+	// answer is silently dropped instead of delivered.
+	machine.HandleIdx(diam.ALL_CMD_INDEX, diam.HandlerFunc(func(_ diam.Conn, m *diam.Message) { rt.deliver(m) }))
+	// Applications with dictionary entries (or that arrive before the
+	// catch-all above, per exact-index-first ServeMux lookup order) are
+	// still matched by exact command index here.
 	apps := make([]*diam.AVP, 0, len(c.Applications))
 	for _, app := range c.Applications {
 		for _, code := range app.Commands {
@@ -139,11 +147,40 @@ func dialSCTP(cli *sm.Client, c TransportConfig) (diam.Conn, error) {
 	if err != nil {
 		return nil, fmt.Errorf("resolve SCTP peer %s: %w", c.Address, err)
 	}
-	raw, err := (&sctp.SocketConfig{InitMsg: sctp.InitMsg{NumOstreams: diam.MaxOutboundSCTPStreams, MaxInstreams: diam.MaxInboundSCTPStreams}}).Dial("sctp", nil, raddr)
+	// Bind to the route-selected local address rather than the static
+	// configured host_ip_address. An unbound (or wrong-address-bound) SCTP
+	// socket lets Linux advertise every local address (loopback, Docker
+	// bridges, other NICs) as valid paths for the association; a peer that
+	// keys admission on source IP can accept the initial handshake and then
+	// reject once traffic actually uses one of those other addresses.
+	// host_ip_address only needs to be correct for the CER AVP — the bind
+	// itself must match what routing to c.Address would actually pick.
+	local, err := routeLocalAddress(c.Address)
+	if err != nil {
+		return nil, fmt.Errorf("resolve SCTP local address for %s: %w", c.Address, err)
+	}
+	laddr := &sctp.SCTPAddr{IPAddrs: []net.IPAddr{{IP: local}}}
+	raw, err := (&sctp.SocketConfig{InitMsg: sctp.InitMsg{NumOstreams: diam.MaxOutboundSCTPStreams, MaxInstreams: diam.MaxInboundSCTPStreams}}).Dial("sctp", laddr, raddr)
 	if err != nil {
 		return nil, fmt.Errorf("dial SCTP peer %s: %w", c.Address, err)
 	}
 	return cli.NewConn(diam.NewSCTPConn(raw), c.Address)
+}
+
+// routeLocalAddress asks the kernel which local address it would actually
+// select to reach remote (no packets are sent — UDP dial just resolves the
+// route), rather than trusting a possibly-stale configured address.
+func routeLocalAddress(remote string) (net.IP, error) {
+	conn, err := net.Dial("udp", remote)
+	if err != nil {
+		return nil, err
+	}
+	defer conn.Close()
+	addr, ok := conn.LocalAddr().(*net.UDPAddr)
+	if !ok || addr.IP == nil {
+		return nil, fmt.Errorf("no local IP selected for %s", remote)
+	}
+	return addr.IP, nil
 }
 func vendorApp(v, id uint32) *diam.AVP {
 	return diam.NewAVP(avp.VendorSpecificApplicationID, avp.Mbit, 0, &diam.GroupedAVP{AVP: []*diam.AVP{diam.NewAVP(avp.VendorID, avp.Mbit, 0, datatype.Unsigned32(v)), diam.NewAVP(avp.AuthApplicationID, avp.Mbit, 0, datatype.Unsigned32(id))}})

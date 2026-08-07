@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/fiorix/go-diameter/v4/diam"
 	"github.com/fiorix/go-diameter/v4/diam/avp"
@@ -94,7 +95,10 @@ type Error struct {
 func (e *Error) Error() string { return e.Kind.Error() }
 func (e *Error) Unwrap() error { return e.Kind }
 
-type Config struct{ OriginHost, OriginRealm string }
+type Config struct {
+	OriginHost, OriginRealm string
+	RequestTimeout          time.Duration
+}
 type Provider struct {
 	cfg       Config
 	transport interface {
@@ -111,6 +115,9 @@ func New(c Config, t interface {
 	if c.OriginHost == "" || c.OriginRealm == "" {
 		return nil, fmt.Errorf("slg: origin identity required")
 	}
+	if c.RequestTimeout <= 0 {
+		c.RequestTimeout = 5 * time.Second
+	}
 	return &Provider{cfg: c, transport: t}, nil
 }
 func NewWithRegistry(c Config, r interface {
@@ -119,6 +126,9 @@ func NewWithRegistry(c Config, r interface {
 	if c.OriginHost == "" || c.OriginRealm == "" || r == nil {
 		return nil, fmt.Errorf("slg: origin identity and registry required")
 	}
+	if c.RequestTimeout <= 0 {
+		c.RequestTimeout = 5 * time.Second
+	}
 	return &Provider{cfg: c, registry: r}, nil
 }
 func (p *Provider) ProvideLocation(ctx context.Context, node domain.ServingNode, r domain.LocationRequest) (domain.PositioningResult, error) {
@@ -126,15 +136,17 @@ func (p *Provider) ProvideLocation(ctx context.Context, node domain.ServingNode,
 	if e != nil {
 		return domain.PositioningResult{}, e
 	}
+	c, cancel := context.WithTimeout(ctx, p.cfg.RequestTimeout)
+	defer cancel()
 	t := p.transport
 	if p.registry != nil {
 		var err error
-		t, err = p.registry.RoundTripperFor(ctx, vcdiam.RouteRequest{ApplicationID: ApplicationID, DestinationHost: node.MMEHost, DestinationRealm: node.MMERealm})
+		t, err = p.registry.RoundTripperFor(c, vcdiam.RouteRequest{ApplicationID: ApplicationID, DestinationHost: node.MMEHost, DestinationRealm: node.MMERealm})
 		if err != nil {
 			return domain.PositioningResult{}, &Error{Kind: ErrRouteUnavailable}
 		}
 	}
-	a, e := t.RoundTrip(ctx, m)
+	a, e := t.RoundTrip(c, m)
 	if e != nil {
 		return domain.PositioningResult{}, e
 	}
@@ -144,7 +156,11 @@ func (p *Provider) BuildPLR(n domain.ServingNode, r domain.LocationRequest) (*di
 	if n.Type != "mme" || strings.TrimSpace(n.MMEHost) == "" || strings.TrimSpace(n.MMERealm) == "" {
 		return nil, &Error{Kind: ErrRouteUnavailable}
 	}
-	if e := r.Target.Validate(); e != nil || r.ClientType == 0 || strings.TrimSpace(r.ClientName) == "" {
+	// ClientType is not checked against a zero value here: the orchestrator
+	// always sets it to a config-validated TS 29.172 LCS-Client-Type before
+	// calling ProvideLocation, and 0 (ClientTypeEmergencyServices) is itself
+	// a legitimate value, not a sentinel for "unset".
+	if e := r.Target.Validate(); e != nil || strings.TrimSpace(r.ClientName) == "" {
 		return nil, &Error{Kind: ErrInvalidRequest}
 	}
 	if r.LocationType != LocationCurrent && r.LocationType != LocationCurrentOrLastKnown {

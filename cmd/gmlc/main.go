@@ -86,7 +86,7 @@ func main() {
 		slog.Error("SLh setup failed", "error", err)
 		os.Exit(1)
 	}
-	provider, err := slg.NewWithRegistry(slg.Config{OriginHost: cfg.Diameter.OriginHost, OriginRealm: cfg.Diameter.OriginRealm}, registry)
+	provider, err := slg.NewWithRegistry(slg.Config{OriginHost: cfg.Diameter.OriginHost, OriginRealm: cfg.Diameter.OriginRealm, RequestTimeout: cfg.Diameter.RequestTimeout}, registry)
 	if err != nil {
 		slog.Error("SLg setup failed", "error", err)
 		os.Exit(1)
