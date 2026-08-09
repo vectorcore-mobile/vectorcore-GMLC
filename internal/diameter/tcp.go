@@ -23,11 +23,25 @@ type Application struct {
 	ID       uint32
 	Commands []uint32
 }
+
+// RequestHandler registers a handler for a Diameter *request* arriving on an
+// otherwise GMLC-initiated connection — e.g. an MME/SGSN sending an LRR over
+// the same association the GMLC dialed out on. This is distinct from
+// Application/Commands above (which only register answer-correlation
+// handlers, Request:false); a peer whose application is already announced
+// via Applications doesn't need a separate listener for this; go-diameter's
+// ServeMux dispatches inbound requests on the same connection just like
+// answers.
+type RequestHandler struct {
+	AppID, Code uint32
+	Handler     diam.Handler
+}
 type TransportConfig struct {
 	Name, Address, Transport, OriginHost, OriginRealm string
 	HostIP                                            net.IP
 	ConnectTimeout, WatchdogInterval, WatchdogTimeout time.Duration
 	Applications                                      []Application
+	RequestHandlers                                   []RequestHandler
 	ExpectedOriginHost, ExpectedOriginRealm           string
 }
 
@@ -89,6 +103,12 @@ func dialTransport(ctx context.Context, c TransportConfig) (*tcpRT, error) {
 			machine.HandleIdx(diam.CommandIndex{AppID: app.ID, Code: code, Request: false}, diam.HandlerFunc(func(_ diam.Conn, m *diam.Message) { rt.deliver(m) }))
 		}
 		apps = append(apps, vendorApp(VendorID, app.ID))
+	}
+	// Exact-index lookups are checked before ALL_CMD_INDEX's catch-all (see
+	// the comment above), so registering these here composes safely with the
+	// answer-only dispatch above without touching it.
+	for _, h := range c.RequestHandlers {
+		machine.HandleIdx(diam.CommandIndex{AppID: h.AppID, Code: h.Code, Request: true}, h.Handler)
 	}
 	cli := &sm.Client{Dict: dict.Default, Handler: machine, MaxRetransmits: 0, EnableWatchdog: true, WatchdogInterval: c.WatchdogInterval, RetransmitInterval: c.WatchdogTimeout, SupportedVendorID: []*diam.AVP{diam.NewAVP(avp.SupportedVendorID, avp.Mbit, 0, datatype.Unsigned32(SupportedVendorID))}, VendorSpecificApplicationID: apps}
 	type dialResult struct {

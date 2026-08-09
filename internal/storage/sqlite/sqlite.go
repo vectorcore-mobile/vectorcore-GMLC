@@ -15,6 +15,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/google/uuid"
 	sqlite3 "github.com/mattn/go-sqlite3"
 	"github.com/vectorcore/gmlc/internal/domain"
 	"github.com/vectorcore/gmlc/internal/storage"
@@ -132,7 +133,7 @@ func (s *Store) UpsertClient(ctx context.Context, c storage.Client) error {
 		return err
 	}
 	defer tx.Rollback()
-	_, err = tx.ExecContext(ctx, "INSERT INTO lcs_clients(id,credential_hash,enabled,lcs_client_type,created_at,updated_at) VALUES(?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET credential_hash=excluded.credential_hash,enabled=excluded.enabled,lcs_client_type=excluded.lcs_client_type,updated_at=excluded.updated_at", c.ID, c.CredentialHash, boolInt(c.Enabled), c.LCSClientType, now, now)
+	_, err = tx.ExecContext(ctx, "INSERT INTO lcs_clients(id,credential_hash,enabled,lcs_client_type,lcs_privacy_check,created_at,updated_at) VALUES(?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET credential_hash=excluded.credential_hash,enabled=excluded.enabled,lcs_client_type=excluded.lcs_client_type,lcs_privacy_check=excluded.lcs_privacy_check,updated_at=excluded.updated_at", c.ID, c.CredentialHash, boolInt(c.Enabled), c.LCSClientType, c.LCSPrivacyCheck, now, now)
 	if err != nil {
 		return err
 	}
@@ -160,6 +161,42 @@ func boolInt(v bool) int {
 	return 0
 }
 
+// qosColumns splits a domain.QoSRequest into the five location_requests
+// columns; a nil q yields all-nil/zero args, so an INSERT with no QoS
+// requested stores NULLs exactly like today's behavior before this field
+// existed.
+func qosColumns(q *domain.QoSRequest) (class *uint32, hAcc, vAcc *float64, vertReq int, respTime *uint32) {
+	if q == nil {
+		return nil, nil, nil, 0, nil
+	}
+	return q.Class, q.HorizontalAccuracyMeters, q.VerticalAccuracyMeters, boolInt(q.VerticalRequested), q.ResponseTimeClass
+}
+
+// scanQoS is the inverse of qosColumns: nil unless at least one column was
+// actually set, mirroring qosGroup's own "don't send an empty group" rule
+// on the decode side.
+func scanQoS(class, respTime sql.NullInt64, hAcc, vAcc sql.NullFloat64, vertReq int) *domain.QoSRequest {
+	if !class.Valid && !hAcc.Valid && !vAcc.Valid && !respTime.Valid && vertReq == 0 {
+		return nil
+	}
+	q := &domain.QoSRequest{VerticalRequested: vertReq == 1}
+	if class.Valid {
+		c := uint32(class.Int64)
+		q.Class = &c
+	}
+	if hAcc.Valid {
+		q.HorizontalAccuracyMeters = &hAcc.Float64
+	}
+	if vAcc.Valid {
+		q.VerticalAccuracyMeters = &vAcc.Float64
+	}
+	if respTime.Valid {
+		r := uint32(respTime.Int64)
+		q.ResponseTimeClass = &r
+	}
+	return q
+}
+
 // GetClientCredential is a single fixed-cost query (indexed primary-key
 // lookup) regardless of whether id matches a row, and regardless of how
 // many services/prefixes that client has — see storage.Store for why that
@@ -167,7 +204,7 @@ func boolInt(v bool) int {
 func (s *Store) GetClientCredential(ctx context.Context, id string) (storage.Client, error) {
 	var c storage.Client
 	var enabled int
-	err := s.db.QueryRowContext(ctx, "SELECT id,credential_hash,enabled,lcs_client_type FROM lcs_clients WHERE id=?", id).Scan(&c.ID, &c.CredentialHash, &enabled, &c.LCSClientType)
+	err := s.db.QueryRowContext(ctx, "SELECT id,credential_hash,enabled,lcs_client_type,lcs_privacy_check FROM lcs_clients WHERE id=?", id).Scan(&c.ID, &c.CredentialHash, &enabled, &c.LCSClientType, &c.LCSPrivacyCheck)
 	if errors.Is(err, sql.ErrNoRows) {
 		return c, storage.ErrNotFound
 	}
@@ -215,7 +252,8 @@ func (s *Store) CreateRequest(ctx context.Context, r domain.Request) (domain.Req
 	now := time.Now().UTC()
 	r.CreatedAt = now
 	r.UpdatedAt = now
-	_, err := s.db.ExecContext(ctx, "INSERT INTO location_requests(id,client_id,idempotency_key,service,target_kind,target_value,state,failure_code,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)", r.ID, r.ClientID, r.IdempotencyKey, r.Service, r.TargetKind, r.TargetValue, r.State, r.FailureCode, utc(now), utc(now))
+	qosClass, qosHAcc, qosVAcc, qosVertReq, qosRespTime := qosColumns(r.QoS)
+	_, err := s.db.ExecContext(ctx, "INSERT INTO location_requests(id,client_id,idempotency_key,service,target_kind,target_value,state,failure_code,location_type,priority,qos_class,qos_horizontal_accuracy_meters,qos_vertical_accuracy_meters,qos_vertical_requested,qos_response_time,subscription_id,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", r.ID, r.ClientID, r.IdempotencyKey, r.Service, r.TargetKind, r.TargetValue, r.State, r.FailureCode, r.LocationType, r.Priority, qosClass, qosHAcc, qosVAcc, qosVertReq, qosRespTime, r.SubscriptionID, utc(now), utc(now))
 	if err == nil {
 		return r, true, nil
 	}
@@ -232,12 +270,24 @@ func isUniqueConstraintErr(err error) bool {
 func (s *Store) byClientKey(ctx context.Context, c, k string) (domain.Request, error) {
 	var r domain.Request
 	var created, updated string
-	err := s.db.QueryRowContext(ctx, "SELECT id,client_id,idempotency_key,service,target_kind,target_value,state,failure_code,attempt_count,created_at,updated_at FROM location_requests WHERE client_id=? AND idempotency_key=?", c, k).Scan(&r.ID, &r.ClientID, &r.IdempotencyKey, &r.Service, &r.TargetKind, &r.TargetValue, &r.State, &r.FailureCode, &r.AttemptCount, &created, &updated)
+	var priority, qosClass, qosRespTime sql.NullInt64
+	var qosHAcc, qosVAcc sql.NullFloat64
+	var qosVertReq int
+	var subscriptionID sql.NullString
+	err := s.db.QueryRowContext(ctx, "SELECT id,client_id,idempotency_key,service,target_kind,target_value,state,failure_code,attempt_count,location_type,priority,qos_class,qos_horizontal_accuracy_meters,qos_vertical_accuracy_meters,qos_vertical_requested,qos_response_time,subscription_id,created_at,updated_at FROM location_requests WHERE client_id=? AND idempotency_key=?", c, k).Scan(&r.ID, &r.ClientID, &r.IdempotencyKey, &r.Service, &r.TargetKind, &r.TargetValue, &r.State, &r.FailureCode, &r.AttemptCount, &r.LocationType, &priority, &qosClass, &qosHAcc, &qosVAcc, &qosVertReq, &qosRespTime, &subscriptionID, &created, &updated)
 	if errors.Is(err, sql.ErrNoRows) {
 		return r, storage.ErrNotFound
 	}
 	if err != nil {
 		return r, err
+	}
+	if priority.Valid {
+		p := uint32(priority.Int64)
+		r.Priority = &p
+	}
+	r.QoS = scanQoS(qosClass, qosRespTime, qosHAcc, qosVAcc, qosVertReq)
+	if subscriptionID.Valid {
+		r.SubscriptionID = &subscriptionID.String
 	}
 	r.CreatedAt, _ = parseTime(created)
 	r.UpdatedAt, _ = parseTime(updated)
@@ -246,16 +296,32 @@ func (s *Store) byClientKey(ctx context.Context, c, k string) (domain.Request, e
 func (s *Store) GetRequest(ctx context.Context, id string) (domain.Request, error) {
 	var r domain.Request
 	var created, updated string
-	err := s.db.QueryRowContext(ctx, "SELECT id,client_id,idempotency_key,service,target_kind,target_value,state,failure_code,attempt_count,created_at,updated_at FROM location_requests WHERE id=?", id).Scan(&r.ID, &r.ClientID, &r.IdempotencyKey, &r.Service, &r.TargetKind, &r.TargetValue, &r.State, &r.FailureCode, &r.AttemptCount, &created, &updated)
+	var priority, qosClass, qosRespTime sql.NullInt64
+	var qosHAcc, qosVAcc sql.NullFloat64
+	var qosVertReq int
+	var subscriptionID sql.NullString
+	err := s.db.QueryRowContext(ctx, "SELECT id,client_id,idempotency_key,service,target_kind,target_value,state,failure_code,attempt_count,location_type,priority,qos_class,qos_horizontal_accuracy_meters,qos_vertical_accuracy_meters,qos_vertical_requested,qos_response_time,subscription_id,created_at,updated_at FROM location_requests WHERE id=?", id).Scan(&r.ID, &r.ClientID, &r.IdempotencyKey, &r.Service, &r.TargetKind, &r.TargetValue, &r.State, &r.FailureCode, &r.AttemptCount, &r.LocationType, &priority, &qosClass, &qosHAcc, &qosVAcc, &qosVertReq, &qosRespTime, &subscriptionID, &created, &updated)
 	if errors.Is(err, sql.ErrNoRows) {
 		return r, storage.ErrNotFound
 	}
 	if err != nil {
 		return r, err
 	}
+	if priority.Valid {
+		p := uint32(priority.Int64)
+		r.Priority = &p
+	}
+	r.QoS = scanQoS(qosClass, qosRespTime, qosHAcc, qosVAcc, qosVertReq)
+	if subscriptionID.Valid {
+		r.SubscriptionID = &subscriptionID.String
+	}
 	r.CreatedAt, _ = parseTime(created)
 	r.UpdatedAt, _ = parseTime(updated)
 	return r, nil
+}
+func (s *Store) SetRequestSubscription(ctx context.Context, requestID, subscriptionID string) error {
+	_, err := s.db.ExecContext(ctx, "UPDATE location_requests SET subscription_id=? WHERE id=?", subscriptionID, requestID)
+	return err
 }
 func (s *Store) TransitionRequest(ctx context.Context, id string, to domain.State, code string) (domain.Request, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
@@ -433,9 +499,21 @@ func (s *Store) SaveServingNode(ctx context.Context, requestID string, n domain.
 func getRequestTx(ctx context.Context, tx *sql.Tx, id string) (domain.Request, error) {
 	var r domain.Request
 	var c, u string
-	err := tx.QueryRowContext(ctx, "SELECT id,client_id,idempotency_key,service,target_kind,target_value,state,failure_code,attempt_count,created_at,updated_at FROM location_requests WHERE id=?", id).Scan(&r.ID, &r.ClientID, &r.IdempotencyKey, &r.Service, &r.TargetKind, &r.TargetValue, &r.State, &r.FailureCode, &r.AttemptCount, &c, &u)
+	var priority, qosClass, qosRespTime sql.NullInt64
+	var qosHAcc, qosVAcc sql.NullFloat64
+	var qosVertReq int
+	var subscriptionID sql.NullString
+	err := tx.QueryRowContext(ctx, "SELECT id,client_id,idempotency_key,service,target_kind,target_value,state,failure_code,attempt_count,location_type,priority,qos_class,qos_horizontal_accuracy_meters,qos_vertical_accuracy_meters,qos_vertical_requested,qos_response_time,subscription_id,created_at,updated_at FROM location_requests WHERE id=?", id).Scan(&r.ID, &r.ClientID, &r.IdempotencyKey, &r.Service, &r.TargetKind, &r.TargetValue, &r.State, &r.FailureCode, &r.AttemptCount, &r.LocationType, &priority, &qosClass, &qosHAcc, &qosVAcc, &qosVertReq, &qosRespTime, &subscriptionID, &c, &u)
 	if errors.Is(err, sql.ErrNoRows) {
 		return r, storage.ErrNotFound
+	}
+	if priority.Valid {
+		p := uint32(priority.Int64)
+		r.Priority = &p
+	}
+	r.QoS = scanQoS(qosClass, qosRespTime, qosHAcc, qosVAcc, qosVertReq)
+	if subscriptionID.Valid {
+		r.SubscriptionID = &subscriptionID.String
 	}
 	r.CreatedAt, _ = parseTime(c)
 	r.UpdatedAt, _ = parseTime(u)
@@ -470,6 +548,194 @@ func (s *Store) Purge(ctx context.Context, requestBefore, resultBefore time.Time
 		return err
 	}
 	return tx.Commit()
+}
+func (s *Store) CreateSubscription(ctx context.Context, clientID, callbackURL string, callbackSecret []byte) (storage.Subscription, error) {
+	sub := storage.Subscription{ID: uuid.NewString(), ClientID: clientID, CallbackURL: callbackURL, CallbackSecret: callbackSecret, CreatedAt: time.Now().UTC()}
+	_, err := s.db.ExecContext(ctx, "INSERT INTO delivery_subscriptions(id,client_id,callback_url,callback_secret,created_at) VALUES(?,?,?,?,?)", sub.ID, sub.ClientID, sub.CallbackURL, sub.CallbackSecret, utc(sub.CreatedAt))
+	return sub, err
+}
+func (s *Store) GetSubscription(ctx context.Context, id string) (storage.Subscription, error) {
+	var sub storage.Subscription
+	var created string
+	err := s.db.QueryRowContext(ctx, "SELECT id,client_id,callback_url,callback_secret,created_at FROM delivery_subscriptions WHERE id=?", id).Scan(&sub.ID, &sub.ClientID, &sub.CallbackURL, &sub.CallbackSecret, &created)
+	if errors.Is(err, sql.ErrNoRows) {
+		return sub, storage.ErrNotFound
+	}
+	if err != nil {
+		return sub, err
+	}
+	sub.CreatedAt, _ = parseTime(created)
+	return sub, nil
+}
+func (s *Store) GetDelivery(ctx context.Context, id string) (storage.Delivery, error) {
+	var d storage.Delivery
+	var created, updated string
+	var nextAttempt sql.NullString
+	var responseCode sql.NullInt64
+	err := s.db.QueryRowContext(ctx, "SELECT id,subscription_id,payload,state,attempt_count,next_attempt_at,last_response_code,created_at,updated_at FROM deliveries WHERE id=?", id).Scan(&d.ID, &d.SubscriptionID, &d.Payload, &d.State, &d.AttemptCount, &nextAttempt, &responseCode, &created, &updated)
+	if errors.Is(err, sql.ErrNoRows) {
+		return d, storage.ErrNotFound
+	}
+	if err != nil {
+		return d, err
+	}
+	if nextAttempt.Valid {
+		t, _ := parseTime(nextAttempt.String)
+		d.NextAttemptAt = &t
+	}
+	if responseCode.Valid {
+		c := int(responseCode.Int64)
+		d.LastResponseCode = &c
+	}
+	d.CreatedAt, _ = parseTime(created)
+	d.UpdatedAt, _ = parseTime(updated)
+	return d, nil
+}
+func (s *Store) CreateDelivery(ctx context.Context, subscriptionID string, payload []byte) (storage.Delivery, error) {
+	now := time.Now().UTC()
+	d := storage.Delivery{ID: uuid.NewString(), SubscriptionID: subscriptionID, Payload: payload, State: storage.DeliveryPending, CreatedAt: now, UpdatedAt: now}
+	_, err := s.db.ExecContext(ctx, "INSERT INTO deliveries(id,subscription_id,payload,state,attempt_count,created_at,updated_at) VALUES(?,?,?,?,?,?,?)", d.ID, d.SubscriptionID, d.Payload, d.State, 0, utc(now), utc(now))
+	return d, err
+}
+
+// ClaimNextDelivery mirrors ClaimNextQueued exactly: claim-then-read inside
+// one transaction, so a concurrent claim (or the same delivery already
+// in-flight) can't be picked twice — RowsAffected!=1 after the UPDATE means
+// someone else claimed it first, reported as storage.ErrConflict.
+func (s *Store) ClaimNextDelivery(ctx context.Context, now time.Time) (storage.Delivery, bool, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return storage.Delivery{}, false, err
+	}
+	defer tx.Rollback()
+	var id string
+	err = tx.QueryRowContext(ctx, "SELECT id FROM deliveries WHERE state=? AND (next_attempt_at IS NULL OR next_attempt_at<=?) ORDER BY created_at,id LIMIT 1", storage.DeliveryPending, utc(now)).Scan(&id)
+	if errors.Is(err, sql.ErrNoRows) {
+		return storage.Delivery{}, false, nil
+	}
+	if err != nil {
+		return storage.Delivery{}, false, err
+	}
+	res, err := tx.ExecContext(ctx, "UPDATE deliveries SET state=?,attempt_count=attempt_count+1,updated_at=? WHERE id=? AND state=?", storage.DeliveryInFlight, utc(now), id, storage.DeliveryPending)
+	if err != nil {
+		return storage.Delivery{}, false, err
+	}
+	n, _ := res.RowsAffected()
+	if n != 1 {
+		return storage.Delivery{}, false, storage.ErrConflict
+	}
+	d, err := getDeliveryTx(ctx, tx, id)
+	if err != nil {
+		return d, false, err
+	}
+	d.State = storage.DeliveryInFlight
+	if err = tx.Commit(); err != nil {
+		return d, false, err
+	}
+	return d, true, nil
+}
+func getDeliveryTx(ctx context.Context, tx *sql.Tx, id string) (storage.Delivery, error) {
+	var d storage.Delivery
+	var created, updated string
+	var nextAttempt sql.NullString
+	var responseCode sql.NullInt64
+	err := tx.QueryRowContext(ctx, "SELECT id,subscription_id,payload,state,attempt_count,next_attempt_at,last_response_code,created_at,updated_at FROM deliveries WHERE id=?", id).Scan(&d.ID, &d.SubscriptionID, &d.Payload, &d.State, &d.AttemptCount, &nextAttempt, &responseCode, &created, &updated)
+	if errors.Is(err, sql.ErrNoRows) {
+		return d, storage.ErrNotFound
+	}
+	if err != nil {
+		return d, err
+	}
+	if nextAttempt.Valid {
+		t, _ := parseTime(nextAttempt.String)
+		d.NextAttemptAt = &t
+	}
+	if responseCode.Valid {
+		c := int(responseCode.Int64)
+		d.LastResponseCode = &c
+	}
+	d.CreatedAt, _ = parseTime(created)
+	d.UpdatedAt, _ = parseTime(updated)
+	return d, nil
+}
+
+// RequeueDelivery mirrors Requeue: transitions an in-flight delivery back
+// to DeliveryPending with a future next_attempt_at after a transient
+// failure, so ClaimNextDelivery's WHERE state=DeliveryPending can pick it
+// up again once due, but not before — and, critically, not concurrently
+// with any other in-flight claim of the same row.
+func (s *Store) RequeueDelivery(ctx context.Context, id string, next time.Time) error {
+	res, err := s.db.ExecContext(ctx, "UPDATE deliveries SET state=?,next_attempt_at=?,updated_at=? WHERE id=? AND state=?", storage.DeliveryPending, utc(next), utc(time.Now()), id, storage.DeliveryInFlight)
+	if err != nil {
+		return err
+	}
+	n, _ := res.RowsAffected()
+	if n != 1 {
+		return storage.ErrConflict
+	}
+	return nil
+}
+func (s *Store) FailDelivery(ctx context.Context, id string, responseCode int) error {
+	res, err := s.db.ExecContext(ctx, "UPDATE deliveries SET state=?,last_response_code=?,updated_at=? WHERE id=? AND state=?", storage.DeliveryFailed, responseCode, utc(time.Now()), id, storage.DeliveryInFlight)
+	if err != nil {
+		return err
+	}
+	n, _ := res.RowsAffected()
+	if n != 1 {
+		return storage.ErrConflict
+	}
+	return nil
+}
+func (s *Store) MarkDelivered(ctx context.Context, id string, responseCode int) error {
+	res, err := s.db.ExecContext(ctx, "UPDATE deliveries SET state=?,last_response_code=?,updated_at=? WHERE id=? AND state=?", storage.DeliveryDelivered, responseCode, utc(time.Now()), id, storage.DeliveryInFlight)
+	if err != nil {
+		return err
+	}
+	n, _ := res.RowsAffected()
+	if n != 1 {
+		return storage.ErrConflict
+	}
+	return nil
+}
+func (s *Store) CreateDeferredLocationSubscription(ctx context.Context, clientID, targetKind, targetValue string, ref byte) (storage.DeferredLocationSubscription, error) {
+	now := time.Now().UTC()
+	sub := storage.DeferredLocationSubscription{LCSReferenceNumber: ref, ClientID: clientID, TargetKind: targetKind, TargetValue: targetValue, State: storage.DeferredSubscriptionPending, CreatedAt: now, UpdatedAt: now}
+	_, err := s.db.ExecContext(ctx, "INSERT INTO deferred_location_subscriptions(lcs_reference_number,client_id,target_kind,target_value,state,created_at,updated_at) VALUES(?,?,?,?,?,?,?)", ref, clientID, targetKind, targetValue, sub.State, utc(now), utc(now))
+	return sub, err
+}
+func (s *Store) FindPendingDeferredLocationSubscription(ctx context.Context, ref byte) (storage.DeferredLocationSubscription, error) {
+	var sub storage.DeferredLocationSubscription
+	var created, updated string
+	err := s.db.QueryRowContext(ctx, "SELECT lcs_reference_number,client_id,target_kind,target_value,state,created_at,updated_at FROM deferred_location_subscriptions WHERE lcs_reference_number=? AND state=?", ref, storage.DeferredSubscriptionPending).Scan(&sub.LCSReferenceNumber, &sub.ClientID, &sub.TargetKind, &sub.TargetValue, &sub.State, &created, &updated)
+	if errors.Is(err, sql.ErrNoRows) {
+		return sub, storage.ErrNotFound
+	}
+	if err != nil {
+		return sub, err
+	}
+	sub.CreatedAt, _ = parseTime(created)
+	sub.UpdatedAt, _ = parseTime(updated)
+	return sub, nil
+}
+func (s *Store) MarkDeferredLocationSubscriptionReported(ctx context.Context, ref byte) error {
+	res, err := s.db.ExecContext(ctx, "UPDATE deferred_location_subscriptions SET state=?,updated_at=? WHERE lcs_reference_number=? AND state=?", storage.DeferredSubscriptionReported, utc(time.Now()), ref, storage.DeferredSubscriptionPending)
+	if err != nil {
+		return err
+	}
+	n, _ := res.RowsAffected()
+	if n != 1 {
+		return storage.ErrConflict
+	}
+	return nil
+}
+func (s *Store) CreateLocationReport(ctx context.Context, r storage.LocationReport) (storage.LocationReport, error) {
+	r.ID = uuid.NewString()
+	if r.ReceivedAt.IsZero() {
+		r.ReceivedAt = time.Now().UTC()
+	}
+	_, err := s.db.ExecContext(ctx, "INSERT INTO location_reports(id,lcs_reference_number,location_event,target_kind,target_value,raw_gad,ecgi,accuracy_fulfilment,age_of_location_estimate,raw_velocity_estimate,eutran_positioning_data,received_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+		r.ID, r.LCSReferenceNumber, r.LocationEvent, r.TargetKind, r.TargetValue, r.RawGAD, r.ECGI, r.AccuracyFulfilment, r.AgeOfLocationEstimate, r.RawVelocityEstimate, r.EUTRANPositioningData, utc(r.ReceivedAt))
+	return r, err
 }
 func (s *Store) Close(ctx context.Context) error {
 	_, _ = s.db.ExecContext(ctx, fmt.Sprintf("PRAGMA wal_checkpoint(TRUNCATE)"))

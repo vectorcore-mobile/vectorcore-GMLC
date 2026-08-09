@@ -15,6 +15,10 @@ type RegistryConfig struct {
 	HostIP                                                                        net.IP
 	ConnectTimeout, ReconnectMin, ReconnectMax, WatchdogInterval, WatchdogTimeout time.Duration
 	Peers                                                                         []PeerConfig
+	// RequestHandlers are registered identically on every peer connection —
+	// an inbound LRR can arrive over whichever peer connection the
+	// originating MME/SGSN routes it through, not just a designated one.
+	RequestHandlers []RequestHandler
 }
 type Registry struct {
 	table    *PeerTable
@@ -25,7 +29,7 @@ func BuildRegistry(c RegistryConfig) *Registry {
 	r := &Registry{table: NewPeerTable()}
 	for _, p := range c.Peers {
 		p := p
-		tc := TransportConfig{Name: p.Name, Address: p.Address, Transport: p.Transport, OriginHost: c.OriginHost, OriginRealm: c.OriginRealm, HostIP: c.HostIP, ConnectTimeout: c.ConnectTimeout, WatchdogInterval: c.WatchdogInterval, WatchdogTimeout: c.WatchdogTimeout, ExpectedOriginHost: p.ExpectedOriginHost, ExpectedOriginRealm: p.ExpectedOriginRealm, Applications: []Application{{ID: SLhApplicationID, Commands: []uint32{8388622}}, {ID: SLgApplicationID, Commands: []uint32{8388620}}}}
+		tc := TransportConfig{Name: p.Name, Address: p.Address, Transport: p.Transport, OriginHost: c.OriginHost, OriginRealm: c.OriginRealm, HostIP: c.HostIP, ConnectTimeout: c.ConnectTimeout, WatchdogInterval: c.WatchdogInterval, WatchdogTimeout: c.WatchdogTimeout, ExpectedOriginHost: p.ExpectedOriginHost, ExpectedOriginRealm: p.ExpectedOriginRealm, Applications: []Application{{ID: SLhApplicationID, Commands: []uint32{8388622}}, {ID: SLgApplicationID, Commands: []uint32{8388620}}}, RequestHandlers: c.RequestHandlers}
 		m := New(Config{ReconnectMin: c.ReconnectMin, ReconnectMax: c.ReconnectMax}, TransportDialer(tc))
 		m.SetName(p.Name)
 		m.SetCapabilityCallback(p.Address, p.Transport, func(m *Manager, cap Capability) {

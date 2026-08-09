@@ -152,6 +152,124 @@ func TestClientLCSClientTypeRoundTrips(t *testing.T) {
 		t.Fatalf("upsert did not update lcs_client_type: %+v %v", c, e)
 	}
 }
+func TestDeliveryLifecycle(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	if e := s.UpsertClient(ctx, storage.Client{ID: "c", CredentialHash: []byte("h"), Enabled: true}); e != nil {
+		t.Fatal(e)
+	}
+	sub, e := s.CreateSubscription(ctx, "c", "https://example.com/callback", []byte("ciphertext"))
+	if e != nil || sub.ID == "" {
+		t.Fatalf("create subscription: %+v %v", sub, e)
+	}
+	got, e := s.GetSubscription(ctx, sub.ID)
+	if e != nil || got.CallbackURL != sub.CallbackURL || string(got.CallbackSecret) != "ciphertext" {
+		t.Fatalf("get subscription: %+v %v", got, e)
+	}
+	if _, e = s.GetSubscription(ctx, "missing"); e != storage.ErrNotFound {
+		t.Fatalf("expected ErrNotFound, got %v", e)
+	}
+
+	d, e := s.CreateDelivery(ctx, sub.ID, []byte(`{"hello":"world"}`))
+	if e != nil || d.State != storage.DeliveryPending || d.AttemptCount != 0 {
+		t.Fatalf("create delivery: %+v %v", d, e)
+	}
+
+	// Nothing else pending yet — a second claim finds nothing.
+	claimed, ok, e := s.ClaimNextDelivery(ctx, time.Now())
+	if e != nil || !ok || claimed.ID != d.ID || claimed.AttemptCount != 1 {
+		t.Fatalf("claim: %+v %v %v", claimed, ok, e)
+	}
+	_, ok, e = s.ClaimNextDelivery(ctx, time.Now())
+	if e != nil || ok {
+		t.Fatalf("expected nothing else claimable, got ok=%v err=%v", ok, e)
+	}
+
+	// A transient failure requeues it (still pending, still claimable once
+	// its next_attempt_at is due) without marking it terminal.
+	if e = s.RequeueDelivery(ctx, d.ID, time.Now().Add(-time.Second)); e != nil {
+		t.Fatal(e)
+	}
+	claimed2, ok, e := s.ClaimNextDelivery(ctx, time.Now())
+	if e != nil || !ok || claimed2.ID != d.ID || claimed2.AttemptCount != 2 {
+		t.Fatalf("re-claim after requeue: %+v %v %v", claimed2, ok, e)
+	}
+
+	// Exhausting the retry budget marks it permanently failed — no longer
+	// claimable, and a second FailDelivery on the same (now non-pending) row
+	// is a conflict, matching FailRequest's own state-guarded semantics.
+	if e = s.FailDelivery(ctx, d.ID, 503); e != nil {
+		t.Fatal(e)
+	}
+	if e = s.FailDelivery(ctx, d.ID, 503); e != storage.ErrConflict {
+		t.Fatalf("expected ErrConflict re-failing a terminal delivery, got %v", e)
+	}
+	_, ok, e = s.ClaimNextDelivery(ctx, time.Now())
+	if e != nil || ok {
+		t.Fatalf("failed delivery should not be claimable, got ok=%v err=%v", ok, e)
+	}
+
+	// A separate delivery that succeeds on first attempt.
+	d2, e := s.CreateDelivery(ctx, sub.ID, []byte(`{}`))
+	if e != nil {
+		t.Fatal(e)
+	}
+	if _, _, e = s.ClaimNextDelivery(ctx, time.Now()); e != nil {
+		t.Fatal(e)
+	}
+	if e = s.MarkDelivered(ctx, d2.ID, 200); e != nil {
+		t.Fatal(e)
+	}
+	if e = s.MarkDelivered(ctx, d2.ID, 200); e != storage.ErrConflict {
+		t.Fatalf("expected ErrConflict re-delivering a terminal delivery, got %v", e)
+	}
+}
+func TestLocationReportCorrelation(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	if e := s.UpsertClient(ctx, storage.Client{ID: "c", CredentialHash: []byte("h"), Enabled: true}); e != nil {
+		t.Fatal(e)
+	}
+
+	// No pending subscription yet — an unsolicited report (e.g.
+	// EMERGENCY_CALL_ORIGINATION) persists with a nil LCSReferenceNumber,
+	// not an error.
+	unsolicited, e := s.CreateLocationReport(ctx, storage.LocationReport{LocationEvent: 0, TargetKind: "imsi", TargetValue: "001010123456789"})
+	if e != nil || unsolicited.ID == "" || unsolicited.LCSReferenceNumber != nil {
+		t.Fatalf("unsolicited report: %+v %v", unsolicited, e)
+	}
+	if _, e = s.FindPendingDeferredLocationSubscription(ctx, 7); e != storage.ErrNotFound {
+		t.Fatalf("expected ErrNotFound before any subscription exists, got %v", e)
+	}
+
+	sub, e := s.CreateDeferredLocationSubscription(ctx, "c", "imsi", "001010123456789", 7)
+	if e != nil || sub.State != storage.DeferredSubscriptionPending {
+		t.Fatalf("create subscription: %+v %v", sub, e)
+	}
+	found, e := s.FindPendingDeferredLocationSubscription(ctx, 7)
+	if e != nil || found.ClientID != "c" || found.TargetValue != "001010123456789" {
+		t.Fatalf("find pending: %+v %v", found, e)
+	}
+
+	if e = s.MarkDeferredLocationSubscriptionReported(ctx, 7); e != nil {
+		t.Fatal(e)
+	}
+	// Reported, so no longer pending — a correlated report referencing it
+	// (matching internal/lrr's own flow) sees ErrNotFound on a re-lookup,
+	// and re-marking a non-pending subscription is a conflict.
+	if _, e = s.FindPendingDeferredLocationSubscription(ctx, 7); e != storage.ErrNotFound {
+		t.Fatalf("expected ErrNotFound after reporting, got %v", e)
+	}
+	if e = s.MarkDeferredLocationSubscriptionReported(ctx, 7); e != storage.ErrConflict {
+		t.Fatalf("expected ErrConflict re-marking a reported subscription, got %v", e)
+	}
+
+	ref := byte(7)
+	correlated, e := s.CreateLocationReport(ctx, storage.LocationReport{LCSReferenceNumber: &ref, LocationEvent: 4, TargetKind: "imsi", TargetValue: "001010123456789"})
+	if e != nil || correlated.LCSReferenceNumber == nil || *correlated.LCSReferenceNumber != 7 {
+		t.Fatalf("correlated report: %+v %v", correlated, e)
+	}
+}
 func TestPurgePurgesAuditEvents(t *testing.T) {
 	s := testStore(t)
 	ctx := context.Background()

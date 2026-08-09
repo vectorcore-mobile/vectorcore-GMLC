@@ -182,6 +182,31 @@ func EncodeMSISDN(s string) ([]byte, error) {
 	}
 	return out, nil
 }
+
+// DecodeMSISDN reverses EncodeMSISDN's TBCD packing. 0xf in the high nibble
+// of the final octet is the odd-length filler and is only valid there — a
+// filler nibble anywhere else, or any non-BCD nibble, is malformed input.
+func DecodeMSISDN(b []byte) (string, error) {
+	var sb strings.Builder
+	for i, o := range b {
+		lo, hi := o&0x0f, o>>4
+		if lo > 9 {
+			return "", ErrInvalidTarget
+		}
+		sb.WriteByte('0' + lo)
+		if hi == 0x0f {
+			if i != len(b)-1 {
+				return "", ErrInvalidTarget
+			}
+			break
+		}
+		if hi > 9 {
+			return "", ErrInvalidTarget
+		}
+		sb.WriteByte('0' + hi)
+	}
+	return sb.String(), nil
+}
 func (r *Resolver) DecodeRIA(req, ans *diam.Message) (domain.ServingNode, error) {
 	if ans == nil || ans.Header.ApplicationID != ApplicationID || ans.Header.CommandCode != CommandRoutingInfo || ans.Header.CommandFlags&diam.RequestFlag != 0 {
 		return domain.ServingNode{}, &Error{Kind: ErrMalformed}

@@ -52,3 +52,32 @@ clients:
     # downstream at the MME/HSS; only assign them to clients you trust for
     # that purpose.
     lcs_client_type: "value_added_services"
+    # lcs_privacy_check (TS 29.172 LCS-Privacy-Check, operator-set only —
+    # never exposed via the REST API): allowed_without_notification
+    # (default), allowed_with_notification, allowed_if_no_response,
+    # restricted_if_no_response, not_allowed. Governs whether/how the
+    # target subscriber is notified or consulted before disclosure — this
+    # protects the subscriber, not the requesting client, so it must never
+    # be settable by the caller.
+    lcs_privacy_check: "allowed_without_notification"
+delivery:
+  # Delivery is optional; enable it once something needs to consume it (LRR
+  # deferred reports, REST async-completion callbacks). Both are outbound
+  # webhook POSTs signed with HMAC-SHA256 (X-GMLC-Signature: sha256=<hex>).
+  enabled: false
+  max_attempts: 5
+  retry_backoff_min: "1s"
+  retry_backoff_max: "5m"
+  request_timeout: "10s"
+  # encryption_key: 32 bytes, hex-encoded (64 hex characters), used to
+  # encrypt callback secrets at rest (AES-256-GCM). Generate with e.g.
+  # `openssl rand -hex 32`. Supply from protected deployment configuration,
+  # never source control. Required only if enabled is true.
+  encryption_key: "replace-with-64-hex-characters-32-random-bytes-aes256key"
+lrr:
+  # LRR is optional; enable it to decode/answer inbound TS 29.172
+  # Location-Report-Request. There is no separate inbound listener — an LRR
+  # arrives on the same connection this GMLC dialed out to its DRA/peers on.
+  # Disabled by default: without it, an unexpected LRR is silently dropped
+  # by the existing answer-only handling, same as before this was added.
+  enabled: false

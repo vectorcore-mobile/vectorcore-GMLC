@@ -17,6 +17,25 @@ func TestEllipsoidPoint(t *testing.T) {
 		}
 	}
 }
+func TestEncodeUncertaintyValueRoundTrip(t *testing.T) {
+	for _, meters := range []float64{0, 1, 10, 50, 100, 500, 1000, 5000} {
+		octet := EncodeUncertaintyValue(meters)
+		got := decodeUncertaintyValue(octet)
+		// The wire format is a lossy 7-bit log-scale code: an accuracy
+		// request is a requirement, not a measurement, so decoding what we
+		// just encoded must never exceed (loosen) the requested accuracy —
+		// only ever round down to an equal-or-tighter representable step.
+		if got > meters+1e-9 {
+			t.Fatalf("meters=%v encoded octet=%d decoded=%v: overshoot (looser than requested)", meters, octet, got)
+		}
+	}
+	if got := EncodeUncertaintyValue(-5); got != 0 {
+		t.Fatalf("negative meters: expected 0, got %d", got)
+	}
+	if got := EncodeUncertaintyValue(1e9); got != 127 {
+		t.Fatalf("huge meters: expected clamp to 127, got %d", got)
+	}
+}
 func TestMalformed(t *testing.T) {
 	for _, tt := range []struct {
 		b []byte

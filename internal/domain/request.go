@@ -97,6 +97,18 @@ type Request struct {
 	CreatedAt, UpdatedAt                                  time.Time
 	AttemptCount                                          int
 	NextAttemptAt                                         *time.Time
+	// LocationType is the TS 29.172 SLg-Location-Type (Current=0 by default,
+	// or Current-or-Last-Known) the caller requested for this request.
+	LocationType uint32
+	// Priority is the TS 29.172 LCS-Priority (7.4.5); nil omits the AVP.
+	Priority *uint32
+	// QoS is the caller-requested TS 29.172 LCS-QoS (7.4.6); nil omits the AVP.
+	QoS *QoSRequest
+	// SubscriptionID is the storage.Subscription id created at submit time if
+	// the caller registered a callback_url/callback_secret; nil if this
+	// request has no async-completion callback. See internal/service.Submit
+	// and internal/orchestrator's completion hook.
+	SubscriptionID *string
 }
 
 type Result struct {

@@ -117,3 +117,34 @@ func TestClientTypeDefaultAndValues(t *testing.T) {
 		t.Fatal("invalid lcs_client_type accepted")
 	}
 }
+func TestPrivacyCheckDefaultAndValues(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "gmlc.yaml")
+	if err := os.WriteFile(p, []byte(validDiameter("    - {name: a, address: 'a:1', transport: tcp}\n")), 0600); err != nil {
+		t.Fatal(err)
+	}
+	c, err := Load(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Clients[0].LCSPrivacyCheck != "allowed_without_notification" || c.Clients[0].PrivacyCheckValue() != 0 {
+		t.Fatalf("expected default allowed_without_notification, got %+v", c.Clients[0])
+	}
+	for name, want := range map[string]uint32{"allowed_without_notification": 0, "allowed_with_notification": 1, "allowed_if_no_response": 2, "restricted_if_no_response": 3, "not_allowed": 4} {
+		text := strings.Replace(validDiameter("    - {name: a, address: 'a:1', transport: tcp}\n"), "target_prefixes: [\"1\"]}]", "target_prefixes: [\"1\"], lcs_privacy_check: "+name+"}]", 1)
+		p2 := filepath.Join(t.TempDir(), "gmlc.yaml")
+		if err := os.WriteFile(p2, []byte(text), 0600); err != nil {
+			t.Fatal(err)
+		}
+		c2, err := Load(p2)
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if got := c2.Clients[0].PrivacyCheckValue(); got != want {
+			t.Fatalf("%s: got %d, want %d", name, got, want)
+		}
+	}
+	invalid := strings.Replace(validDiameter("    - {name: a, address: 'a:1', transport: tcp}\n"), "target_prefixes: [\"1\"]}]", "target_prefixes: [\"1\"], lcs_privacy_check: bogus}]", 1)
+	if err := loadText(t, invalid); err == nil {
+		t.Fatal("invalid lcs_privacy_check accepted")
+	}
+}

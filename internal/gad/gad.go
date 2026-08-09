@@ -169,3 +169,29 @@ func decodeUncertaintyValue(octet byte) float64 {
 	k := float64(octet & 0x7f)
 	return 10.0 * (math.Pow(1.1, k) - 1.0)
 }
+
+// EncodeUncertaintyValue is the inverse of the TS 23.032 uncertainty-code
+// formula decodeUncertaintyValue implements (meters = 10*(1.1^k - 1)),
+// solved for k. It's exported for internal/slg's SLg-QoS Horizontal-Accuracy/
+// Vertical-Accuracy AVPs (TS 29.172 7.4.7/7.4.8), which reuse the same TS
+// 23.032 "Uncertainty Code" encoding rather than defining their own. The
+// log-scale code can't represent every value exactly, so k is floored
+// (never rounded to nearest): the requested accuracy is a requirement, not a
+// measurement, and this guarantees the encoded AVP never asks the network
+// for a *looser* bound than the caller specified — only ever an equal or
+// tighter one. Negative input is treated as zero uncertainty; the result is
+// clamped to the 7-bit range (0-127) the wire format allows.
+func EncodeUncertaintyValue(meters float64) byte {
+	if meters <= 0 {
+		return 0
+	}
+	k := math.Log(meters/10.0+1.0) / math.Log(1.1)
+	k = math.Floor(k)
+	if k < 0 {
+		k = 0
+	}
+	if k > 127 {
+		k = 127
+	}
+	return byte(k)
+}

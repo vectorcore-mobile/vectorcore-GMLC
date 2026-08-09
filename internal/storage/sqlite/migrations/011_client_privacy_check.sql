@@ -1,0 +1,1 @@
+ALTER TABLE lcs_clients ADD COLUMN lcs_privacy_check INTEGER NOT NULL DEFAULT 0;

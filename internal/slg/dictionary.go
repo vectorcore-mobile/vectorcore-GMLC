@@ -51,5 +51,10 @@ const dictionaryXML = `<?xml version="1.0" encoding="UTF-8"?>
 <avp name="LCS-EPS-Client-Name" code="2501" vendor-id="10415" must="M,V" may-encrypt="N"><data type="Grouped"><rule avp="AVP" required="false"/></data></avp>
 <avp name="Location-Event" code="2518" vendor-id="10415" must="M,V" may-encrypt="N"><data type="Enumerated"/></avp>
 <avp name="ECGI" code="2517" vendor-id="10415" must="M,V" may-encrypt="N"><data type="OctetString"/></avp>
+<avp name="LCS-Reference-Number" code="2531" vendor-id="10415" must="M,V" may-encrypt="N"><data type="OctetString"/></avp>
 <avp name="Location-Estimate" code="1242" vendor-id="0" must="M" may-encrypt="N"><data type="OctetString"/></avp>
+<avp name="Accuracy-Fulfilment-Indicator" code="2513" vendor-id="10415" must="M,V" may-encrypt="N"><data type="Enumerated"/></avp>
+<avp name="Age-Of-Location-Estimate" code="2514" vendor-id="10415" must="M,V" may-encrypt="N"><data type="Unsigned32"/></avp>
+<avp name="Velocity-Estimate" code="2515" vendor-id="10415" must="M,V" may-encrypt="N"><data type="OctetString"/></avp>
+<avp name="EUTRAN-Positioning-Data" code="2516" vendor-id="10415" must="M,V" may-encrypt="N"><data type="OctetString"/></avp>
 </application></diameter>`

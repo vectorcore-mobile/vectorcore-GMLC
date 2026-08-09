@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"flag"
 	"log/slog"
 	"net"
@@ -13,9 +14,12 @@ import (
 
 	"github.com/vectorcore/gmlc/internal/auth"
 	"github.com/vectorcore/gmlc/internal/config"
+	"github.com/vectorcore/gmlc/internal/delivery"
 	vcdiam "github.com/vectorcore/gmlc/internal/diameter"
+	"github.com/vectorcore/gmlc/internal/domain"
 	"github.com/vectorcore/gmlc/internal/httpapi"
 	"github.com/vectorcore/gmlc/internal/logging"
+	"github.com/vectorcore/gmlc/internal/lrr"
 	"github.com/vectorcore/gmlc/internal/orchestrator"
 	"github.com/vectorcore/gmlc/internal/service"
 	"github.com/vectorcore/gmlc/internal/slg"
@@ -58,7 +62,7 @@ func main() {
 		os.Exit(1)
 	}
 	for _, c := range cfg.Clients {
-		if err = st.UpsertClient(ctx, storage.Client{ID: c.ID, CredentialHash: auth.HashToken(c.BearerToken), Enabled: true, Services: c.Services, TargetPrefixes: c.TargetPrefixes, LCSClientType: c.ClientTypeValue()}); err != nil {
+		if err = st.UpsertClient(ctx, storage.Client{ID: c.ID, CredentialHash: auth.HashToken(c.BearerToken), Enabled: true, Services: c.Services, TargetPrefixes: c.TargetPrefixes, LCSClientType: c.ClientTypeValue(), LCSPrivacyCheck: c.PrivacyCheckValue()}); err != nil {
 			slog.Error("client bootstrap failed", "client_id", c.ID, "error", err)
 			os.Exit(1)
 		}
@@ -78,9 +82,38 @@ func main() {
 	for _, p := range cfg.Diameter.Peers {
 		t.Peers = append(t.Peers, vcdiam.PeerConfig{Name: p.Name, Address: p.Address, Transport: p.Transport, ExpectedOriginHost: p.ExpectedOriginHost, ExpectedOriginRealm: p.ExpectedOriginRealm})
 	}
+	// LRR is registered before BuildRegistry, since the registry needs the
+	// handler at connection-dial time. It only needs a codec-only slg.Provider
+	// (no transport/registry — DecodeLRR/BuildLRA are pure marshaling), so
+	// there's no ordering dependency on the registry itself.
+	if cfg.LRR.Enabled {
+		codec, err := slg.New(slg.Config{OriginHost: cfg.Diameter.OriginHost, OriginRealm: cfg.Diameter.OriginRealm}, nil)
+		if err != nil {
+			slog.Error("LRR setup failed", "error", err)
+			os.Exit(1)
+		}
+		t.RequestHandlers = append(t.RequestHandlers, vcdiam.RequestHandler{AppID: slg.ApplicationID, Code: slg.CommandLocationReport, Handler: lrr.New(codec, st)})
+	}
 	registry := vcdiam.BuildRegistry(t)
 	registry.Start()
+	// deliveryKey is resolved once, up front, and reused both by the
+	// service layer (to encrypt callback secrets at submit time — API-ASYNC)
+	// and by deliveryWorker below (to decrypt them at delivery time). A GMLC
+	// with delivery disabled has no key and no callback capability at all:
+	// service.Submit rejects callback_url/callback_secret with
+	// ErrDeliveryNotConfigured rather than accepting a promise it can't keep.
+	var deliveryKey []byte
+	if cfg.Delivery.Enabled {
+		deliveryKey, err = cfg.Delivery.EncryptionKeyBytes()
+		if err != nil {
+			slog.Error("delivery configuration failed", "error", err)
+			os.Exit(1)
+		}
+	}
 	svc := service.New(st, auth.New(st))
+	if deliveryKey != nil {
+		svc.SetSecretEncryptor(func(secret []byte) ([]byte, error) { return delivery.EncryptSecret(deliveryKey, secret) })
+	}
 	resolver, err := slh.NewWithRegistry(slh.Config{OriginHost: cfg.Diameter.OriginHost, OriginRealm: cfg.Diameter.OriginRealm, DestinationRealm: cfg.Diameter.HSSRealm, DestinationHost: cfg.Diameter.HSSHost, RequestTimeout: cfg.Diameter.RequestTimeout}, registry)
 	if err != nil {
 		slog.Error("SLh setup failed", "error", err)
@@ -91,10 +124,43 @@ func main() {
 		slog.Error("SLg setup failed", "error", err)
 		os.Exit(1)
 	}
+	// The delivery worker is entirely separate from the orchestrator worker
+	// below — see delivery.Worker's own doc comment for why sharing a loop
+	// with arbitrary outbound HTTP callbacks would be a mistake — and is
+	// only constructed at all if delivery is configured. Declared here
+	// (before worker.SetCompletionHook below) so that hook's closure can
+	// reference it; it's only assigned/started further down.
+	var deliveryWorker *delivery.Worker
 	worker := orchestrator.New(st, resolver, provider)
 	worker.Start(ctx)
 	svc.SetQueuedHook(worker.Notify)
 	svc.SetCancelHook(worker.Cancel)
+	// API-ASYNC: a request that registered a callback at submit time gets
+	// its completion pushed, not just polled. This fires only for terminal
+	// states the orchestrator itself drove (success or failure) — never for
+	// cancellation (the caller already knows synchronously) or expiration (a
+	// background sweep unrelated to any one worker iteration).
+	worker.SetCompletionHook(func(r domain.Request, v domain.Result) {
+		if r.SubscriptionID == nil {
+			return
+		}
+		payload, err := json.Marshal(httpapi.RequestJSON(r, v))
+		if err != nil {
+			slog.Warn("callback payload marshal failed", "request_id", r.ID, "error", err)
+			return
+		}
+		if _, err = st.CreateDelivery(context.Background(), *r.SubscriptionID, payload); err != nil {
+			slog.Warn("callback delivery enqueue failed", "request_id", r.ID, "error", err)
+			return
+		}
+		if deliveryWorker != nil {
+			deliveryWorker.Notify()
+		}
+	})
+	if cfg.Delivery.Enabled {
+		deliveryWorker = delivery.New(st, delivery.Config{MaxAttempts: cfg.Delivery.MaxAttempts, RetryBackoffMin: cfg.Delivery.RetryBackoffMin, RetryBackoffMax: cfg.Delivery.RetryBackoffMax, RequestTimeout: cfg.Delivery.RequestTimeout, EncryptionKey: deliveryKey})
+		deliveryWorker.Start(ctx)
+	}
 	server := &http.Server{Addr: cfg.Server.ListenAddress, Handler: httpapi.New(svc, registry.OverallReady), ReadHeaderTimeout: 5 * time.Second}
 	go func() {
 		slog.Info("gmlc listening", "address", cfg.Server.ListenAddress)
@@ -110,6 +176,9 @@ func main() {
 	close(purgeStop)
 	_ = server.Shutdown(stop)
 	_ = worker.Close(stop)
+	if deliveryWorker != nil {
+		_ = deliveryWorker.Close(stop)
+	}
 	_ = registry.Close(stop)
 	select {
 	case <-purgeDone:

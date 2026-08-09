@@ -2,6 +2,7 @@ package config
 
 import (
 	"bytes"
+	"encoding/hex"
 	"fmt"
 	"os"
 	"strings"
@@ -18,6 +19,37 @@ type Config struct {
 	Clients   []Client  `yaml:"clients"`
 	Diameter  Diameter  `yaml:"diameter"`
 	Logging   Logging   `yaml:"logging"`
+	Delivery  Delivery  `yaml:"delivery"`
+	LRR       LRR       `yaml:"lrr"`
+}
+
+// LRR gates inbound TS 29.172 Location-Report-Request handling. Disabled by
+// default: a GMLC that never enables it registers no request handler, so an
+// unexpected LRR simply falls through to the existing answer-only catch-all
+// (internal/diameter's ALL_CMD_INDEX handler) and is silently dropped,
+// exactly like today's pre-Phase-6 behavior — enabling it is a deliberate
+// opt-in, not a default-on protocol upgrade.
+type LRR struct {
+	Enabled bool `yaml:"enabled"`
+}
+
+// Delivery configures the shared HTTP-callback outbox worker (internal/delivery)
+// used by both LRR deferred-report delivery and REST-async completion
+// delivery. Disabled by default: a GMLC that never enables it has no
+// callback secrets to protect and no encryption key requirement.
+type Delivery struct {
+	Enabled         bool          `yaml:"enabled"`
+	MaxAttempts     int           `yaml:"max_attempts"`
+	RetryBackoffMin time.Duration `yaml:"retry_backoff_min"`
+	RetryBackoffMax time.Duration `yaml:"retry_backoff_max"`
+	RequestTimeout  time.Duration `yaml:"request_timeout"`
+	// EncryptionKey is a 64-character hex-encoded 32-byte AES-256 key used
+	// to encrypt callback secrets at rest. Required only if enabled;
+	// operator-supplied deployment secret, like bearer tokens — never
+	// source control. Rotating it invalidates every previously-stored
+	// callback secret, so treat it with the same care as the database
+	// itself, not as a rotatable-on-a-whim value.
+	EncryptionKey string `yaml:"encryption_key"`
 }
 type Logging struct {
 	File  string `yaml:"file"`
@@ -72,6 +104,13 @@ type Client struct {
 	// value_added_services (default), plmn_operator_services,
 	// lawful_intercept_services.
 	LCSClientType string `yaml:"lcs_client_type"`
+	// LCSPrivacyCheck selects the TS 29.172 LCS-Privacy-Check sent for this
+	// client's requests. Operator-controlled only — never settable via the
+	// REST API — since it governs the target subscriber's own privacy
+	// protection, not anything about the requesting client. One of:
+	// allowed_without_notification (default), allowed_with_notification,
+	// allowed_if_no_response, restricted_if_no_response, not_allowed.
+	LCSPrivacyCheck string `yaml:"lcs_privacy_check"`
 }
 
 var clientTypeValues = map[string]uint32{
@@ -81,10 +120,38 @@ var clientTypeValues = map[string]uint32{
 	"lawful_intercept_services": domain.ClientTypeLawfulIntercept,
 }
 
+var privacyCheckValues = map[string]uint32{
+	"allowed_without_notification": domain.PrivacyAllowedWithoutNotification,
+	"allowed_with_notification":    domain.PrivacyAllowedWithNotification,
+	"allowed_if_no_response":       domain.PrivacyAllowedIfNoResponse,
+	"restricted_if_no_response":    domain.PrivacyRestrictedIfNoResponse,
+	"not_allowed":                  domain.PrivacyNotAllowed,
+}
+
 // ClientTypeValue resolves the configured LCSClientType name to its TS
 // 29.172 numeric value. LCSClientType is validated by Config.Validate, so
 // this is only called on an already-validated config.
 func (c Client) ClientTypeValue() uint32 { return clientTypeValues[c.LCSClientType] }
+
+// PrivacyCheckValue resolves the configured LCSPrivacyCheck name to its TS
+// 29.172 numeric value. LCSPrivacyCheck is validated by Config.Validate, so
+// this is only called on an already-validated config.
+func (c Client) PrivacyCheckValue() uint32 { return privacyCheckValues[c.LCSPrivacyCheck] }
+
+// EncryptionKeyBytes decodes EncryptionKey from hex and validates it's a
+// full 32-byte AES-256 key. Called both by Validate (so a bad key is caught
+// at startup, not on the first delivery attempt) and by whatever
+// constructs the delivery.Worker.
+func (d Delivery) EncryptionKeyBytes() ([]byte, error) {
+	key, err := hex.DecodeString(d.EncryptionKey)
+	if err != nil {
+		return nil, fmt.Errorf("must be hex-encoded: %w", err)
+	}
+	if len(key) != 32 {
+		return nil, fmt.Errorf("must decode to 32 bytes (AES-256), got %d", len(key))
+	}
+	return key, nil
+}
 
 func Load(path string) (Config, error) {
 	b, err := os.ReadFile(path)
@@ -129,6 +196,21 @@ func (c *Config) applyDefaults() {
 		if c.Clients[i].LCSClientType == "" {
 			c.Clients[i].LCSClientType = "value_added_services"
 		}
+		if c.Clients[i].LCSPrivacyCheck == "" {
+			c.Clients[i].LCSPrivacyCheck = "allowed_without_notification"
+		}
+	}
+	if c.Delivery.MaxAttempts <= 0 {
+		c.Delivery.MaxAttempts = 5
+	}
+	if c.Delivery.RetryBackoffMin <= 0 {
+		c.Delivery.RetryBackoffMin = time.Second
+	}
+	if c.Delivery.RetryBackoffMax < c.Delivery.RetryBackoffMin {
+		c.Delivery.RetryBackoffMax = 5 * time.Minute
+	}
+	if c.Delivery.RequestTimeout <= 0 {
+		c.Delivery.RequestTimeout = 10 * time.Second
 	}
 }
 func (c Config) Validate() error {
@@ -194,6 +276,14 @@ func (c Config) Validate() error {
 		}
 		if _, ok := clientTypeValues[v.LCSClientType]; !ok {
 			return fmt.Errorf("client %q has invalid lcs_client_type %q", v.ID, v.LCSClientType)
+		}
+		if _, ok := privacyCheckValues[v.LCSPrivacyCheck]; !ok {
+			return fmt.Errorf("client %q has invalid lcs_privacy_check %q", v.ID, v.LCSPrivacyCheck)
+		}
+	}
+	if c.Delivery.Enabled {
+		if _, err := c.Delivery.EncryptionKeyBytes(); err != nil {
+			return fmt.Errorf("delivery.encryption_key: %w", err)
 		}
 	}
 	return nil

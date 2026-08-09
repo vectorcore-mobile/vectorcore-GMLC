@@ -178,6 +178,37 @@ func TestWorkerUsesClientConfiguredLCSClientType(t *testing.T) {
 	waitState(t, s, "req", domain.StateCompleted)
 	_ = w.Close(context.Background())
 }
+
+// TestWorkerUsesClientConfiguredPrivacyCheck asserts LCS-Privacy-Check is
+// resolved from the client's own operator-configured record, exactly like
+// LCS-Client-Type — never influenced by anything on the stored request
+// itself (there is no PrivacyCheck field on domain.Request/SubmitInput at
+// all; the REST API has no way to set it), since it governs the target
+// subscriber's privacy protection, not the requesting client's own request.
+func TestWorkerUsesClientConfiguredPrivacyCheck(t *testing.T) {
+	s := store(t)
+	defer s.Close(context.Background())
+	if e := s.UpsertClient(context.Background(), storage.Client{ID: "notify-client", CredentialHash: []byte("x"), Enabled: true, LCSPrivacyCheck: domain.PrivacyAllowedWithNotification}); e != nil {
+		t.Fatal(e)
+	}
+	if _, _, e := s.CreateRequest(context.Background(), domain.Request{ID: "req-privacy", ClientID: "notify-client", IdempotencyKey: "req-privacy", TargetKind: "imsi", TargetValue: "001010123456789", State: domain.StateQueued}); e != nil {
+		t.Fatal(e)
+	}
+	cp := capturingProvider{got: make(chan domain.LocationRequest, 1)}
+	w := New(s, fakeResolver{}, cp)
+	w.Start(context.Background())
+	w.Notify()
+	select {
+	case r := <-cp.got:
+		if r.PrivacyCheck == nil || *r.PrivacyCheck != domain.PrivacyAllowedWithNotification {
+			t.Fatalf("expected PrivacyCheck=%d (allowed with notification), got %v", domain.PrivacyAllowedWithNotification, r.PrivacyCheck)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("provider not invoked")
+	}
+	waitState(t, s, "req-privacy", domain.StateCompleted)
+	_ = w.Close(context.Background())
+}
 func TestWorkerCompletesECGIOnlyResult(t *testing.T) {
 	s := store(t)
 	defer s.Close(context.Background())
@@ -197,4 +228,48 @@ func TestWorkerCompletesECGIOnlyResult(t *testing.T) {
 	if v.Latitude != nil || v.Longitude != nil {
 		t.Fatalf("expected no position for ECGI-only result: %+v", v)
 	}
+}
+
+// TestWorkerCompletionHookFiresOnSuccessAndFailure guards API-ASYNC's
+// integration point: the hook must fire with a State that reflects the
+// just-persisted transition (StateCompleted/StateFailed), not the worker's
+// stale pre-transition in-memory copy — see notifyCompletion.
+func TestWorkerCompletionHookFiresOnSuccessAndFailure(t *testing.T) {
+	s := store(t)
+	defer s.Close(context.Background())
+	type event struct {
+		r domain.Request
+		v domain.Result
+	}
+	got := make(chan event, 4)
+
+	queued(t, s, "hook-ok")
+	w := New(s, fakeResolver{}, fakeProvider{})
+	w.SetCompletionHook(func(r domain.Request, v domain.Result) { got <- event{r, v} })
+	w.Start(context.Background())
+	w.Notify()
+	select {
+	case e := <-got:
+		if e.r.ID != "hook-ok" || e.r.State != domain.StateCompleted || e.v.Latitude == nil || *e.v.Latitude != 1 {
+			t.Fatalf("unexpected completion event: %+v", e)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("completion hook did not fire on success")
+	}
+	_ = w.Close(context.Background())
+
+	queued(t, s, "hook-fail")
+	w2 := New(s, fakeResolver{}, noResultProvider{})
+	w2.SetCompletionHook(func(r domain.Request, v domain.Result) { got <- event{r, v} })
+	w2.Start(context.Background())
+	w2.Notify()
+	select {
+	case e := <-got:
+		if e.r.ID != "hook-fail" || e.r.State != domain.StateFailed || e.r.FailureCode != "no_immediate_result" {
+			t.Fatalf("unexpected failure completion event: %+v", e)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("completion hook did not fire on failure")
+	}
+	_ = w2.Close(context.Background())
 }
