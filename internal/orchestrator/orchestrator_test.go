@@ -273,3 +273,48 @@ func TestWorkerCompletionHookFiresOnSuccessAndFailure(t *testing.T) {
 	}
 	_ = w2.Close(context.Background())
 }
+
+// TestWorkerRecordsLocationHistoryOnCompletion guards Phase C's one
+// non-additive change: every successful completion — not just MLP-
+// originated ones — must populate location_history so MLP's Historic
+// Location Immediate service (hlir/hlia) can serve fixes obtained via any
+// adapter, including this REST-style path exercised by fakeProvider.
+func TestWorkerRecordsLocationHistoryOnCompletion(t *testing.T) {
+	s := store(t)
+	defer s.Close(context.Background())
+	queued(t, s, "hist")
+	w := New(s, fakeResolver{}, fakeProvider{})
+	w.Start(context.Background())
+	defer w.Close(context.Background())
+	w.Notify()
+	waitState(t, s, "hist", domain.StateCompleted)
+	points, e := s.QueryHistory(context.Background(), "imsi", "001010123456789", time.Now().Add(-time.Minute), time.Now().Add(time.Minute), 0, 0)
+	if e != nil {
+		t.Fatal(e)
+	}
+	if len(points) != 1 || points[0].Latitude == nil || *points[0].Latitude != 1 {
+		t.Fatalf("expected one recorded history point, got %+v", points)
+	}
+}
+
+// TestWorkerDoesNotRecordHistoryWithoutAPosition guards the "only a real
+// fix is worth recording" scoping decision — a failed completion (no
+// position was ever obtained) must not leave a location_history row
+// nothing could ever render as an hlia <pos>.
+func TestWorkerDoesNotRecordHistoryWithoutAPosition(t *testing.T) {
+	s := store(t)
+	defer s.Close(context.Background())
+	queued(t, s, "no-hist")
+	w := New(s, fakeResolver{}, noResultProvider{})
+	w.Start(context.Background())
+	defer w.Close(context.Background())
+	w.Notify()
+	waitState(t, s, "no-hist", domain.StateFailed)
+	points, e := s.QueryHistory(context.Background(), "imsi", "001010123456789", time.Now().Add(-time.Minute), time.Now().Add(time.Minute), 0, 0)
+	if e != nil {
+		t.Fatal(e)
+	}
+	if len(points) != 0 {
+		t.Fatalf("expected no history for a failed completion, got %+v", points)
+	}
+}

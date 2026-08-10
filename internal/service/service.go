@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/url"
 	"strings"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/vectorcore/gmlc/internal/auth"
@@ -280,6 +281,27 @@ func (s *Service) GetResult(ctx context.Context, clientID, token, id string) (do
 	v, e := s.store.GetResult(ctx, id)
 	return r, v, e
 }
+// QueryHistory authenticates and authorizes target the same way Submit
+// does (against domain.ServiceImmediate — GMLC has no separate service
+// grant for history queries, and requiring one would mean every existing
+// client config needs updating just to use MLP's Historic Location
+// Immediate service), then reads recorded fixes from storage. Unlike
+// Submit/SubmitBatch this never creates a domain.Request — it's a pure
+// read over internal/orchestrator's already-populated location_history.
+func (s *Service) QueryHistory(ctx context.Context, clientID, token string, target domain.Target, start, stop time.Time, minInterval time.Duration, limit int) ([]storage.HistoryPoint, error) {
+	if err := target.Validate(); err != nil {
+		return nil, err
+	}
+	c, err := s.auth.Authenticate(ctx, clientID, token)
+	if err != nil {
+		return nil, err
+	}
+	if err := s.auth.Authorize(c, domain.ServiceImmediate, target); err != nil {
+		return nil, err
+	}
+	return s.store.QueryHistory(ctx, target.Kind(), target.Value(), start, stop, minInterval, limit)
+}
+
 func (s *Service) Cancel(ctx context.Context, clientID, token, id string) (domain.Request, error) {
 	r, err := s.Get(ctx, clientID, token, id)
 	if err != nil {

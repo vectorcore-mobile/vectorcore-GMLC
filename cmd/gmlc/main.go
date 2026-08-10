@@ -20,6 +20,7 @@ import (
 	"github.com/vectorcore/gmlc/internal/httpapi"
 	"github.com/vectorcore/gmlc/internal/logging"
 	"github.com/vectorcore/gmlc/internal/lrr"
+	"github.com/vectorcore/gmlc/internal/mlp"
 	"github.com/vectorcore/gmlc/internal/orchestrator"
 	"github.com/vectorcore/gmlc/internal/service"
 	"github.com/vectorcore/gmlc/internal/slg"
@@ -92,7 +93,11 @@ func main() {
 			slog.Error("LRR setup failed", "error", err)
 			os.Exit(1)
 		}
-		t.RequestHandlers = append(t.RequestHandlers, vcdiam.RequestHandler{AppID: slg.ApplicationID, Code: slg.CommandLocationReport, Handler: lrr.New(codec, st)})
+		lrrHandler := lrr.New(codec, st)
+		if cfg.MLPReporting.Enabled {
+			lrrHandler.SetPusher(mlp.NewPusher(cfg.MLPReporting.StandardReportURL, cfg.MLPReporting.StandardReportClientID, cfg.MLPReporting.EmergencyReportURL, cfg.MLPReporting.EmergencyReportClientID, cfg.MLPReporting.Timeout))
+		}
+		t.RequestHandlers = append(t.RequestHandlers, vcdiam.RequestHandler{AppID: slg.ApplicationID, Code: slg.CommandLocationReport, Handler: lrrHandler})
 	}
 	registry := vcdiam.BuildRegistry(t)
 	registry.Start()
@@ -161,20 +166,43 @@ func main() {
 		deliveryWorker = delivery.New(st, delivery.Config{MaxAttempts: cfg.Delivery.MaxAttempts, RetryBackoffMin: cfg.Delivery.RetryBackoffMin, RetryBackoffMax: cfg.Delivery.RetryBackoffMax, RequestTimeout: cfg.Delivery.RequestTimeout, EncryptionKey: deliveryKey})
 		deliveryWorker.Start(ctx)
 	}
-	server := &http.Server{Addr: cfg.Server.ListenAddress, Handler: httpapi.New(svc, registry.OverallReady), ReadHeaderTimeout: 5 * time.Second}
-	go func() {
-		slog.Info("gmlc listening", "address", cfg.Server.ListenAddress)
-		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			slog.Error("http server failed", "error", err)
-		}
-	}()
+	// REST and MLP are two independent listeners on two different ports, not
+	// mutually exclusive — either, both, or (briefly, during a supervised
+	// transition) neither may run; config.Validate already rejects both
+	// being disabled at once. Gate, don't delete: REST isn't being removed
+	// by MLP's arrival (see docs/mlp-le-interface-plan.md).
+	var server *http.Server
+	if cfg.Server.Enabled == nil || *cfg.Server.Enabled {
+		server = &http.Server{Addr: cfg.Server.ListenAddress, Handler: httpapi.New(svc, registry.OverallReady), ReadHeaderTimeout: 5 * time.Second}
+		go func() {
+			slog.Info("gmlc listening", "address", cfg.Server.ListenAddress)
+			if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+				slog.Error("http server failed", "error", err)
+			}
+		}()
+	}
+	var mlpServer *http.Server
+	if cfg.MLP.Enabled {
+		mlpServer = &http.Server{Addr: cfg.MLP.ListenAddress, Handler: mlp.New(svc, cfg.MLP.SyncWaitTimeout, cfg.MLP.MaxSyncWaitTimeout), ReadHeaderTimeout: 5 * time.Second}
+		go func() {
+			slog.Info("gmlc mlp listening", "address", cfg.MLP.ListenAddress)
+			if err := mlpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+				slog.Error("mlp http server failed", "error", err)
+			}
+		}()
+	}
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
 	<-sig
 	stop, cancel := context.WithTimeout(context.Background(), cfg.Server.ShutdownTimeout)
 	defer cancel()
 	close(purgeStop)
-	_ = server.Shutdown(stop)
+	if server != nil {
+		_ = server.Shutdown(stop)
+	}
+	if mlpServer != nil {
+		_ = mlpServer.Shutdown(stop)
+	}
 	_ = worker.Close(stop)
 	if deliveryWorker != nil {
 		_ = deliveryWorker.Close(stop)

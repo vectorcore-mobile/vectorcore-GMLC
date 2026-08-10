@@ -209,6 +209,16 @@ func (w *Worker) one(ctx context.Context) bool {
 		return true
 	}
 	slog.Info("location request completed", "request_id", r.ID)
+	// Best-effort: location_history backs MLP's Historic Location Immediate
+	// service, not the request's own completion — a failure here shouldn't
+	// fail (or retry) a request that has already durably completed. Only a
+	// real fix is worth recording; an ECGI-only/no-position completion has
+	// nothing an hlia's <pos> could render.
+	if lat != nil && lon != nil {
+		if he := w.store.RecordHistory(c, r.TargetKind, r.TargetValue, result); he != nil {
+			slog.Warn("location history not recorded", "request_id", r.ID, "error", he)
+		}
+	}
 	w.notifyCompletion(r, domain.StateCompleted, "", result)
 	return true
 }

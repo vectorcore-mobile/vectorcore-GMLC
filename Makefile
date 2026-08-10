@@ -1,7 +1,7 @@
 .PHONY: build test vet clean
 
 BINARY := gmlc
-VERSION := 0.1.0
+VERSION := 0.1.1d
 
 build:
 	mkdir -p bin

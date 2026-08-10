@@ -110,6 +110,17 @@ type LocationReport struct {
 	ReceivedAt                                 time.Time
 }
 
+// HistoryPoint is one recorded location_history fix for a target — the
+// subset of domain.Result an MLP hlia's <pos> needs (see internal/mlp's
+// buildPos, which HistoryPoint mirrors): point + circular uncertainty
+// only, no ellipse fields, matching what the existing MLP immediate
+// services already render.
+type HistoryPoint struct {
+	Shape                                  string
+	Latitude, Longitude, UncertaintyMeters *float64
+	RecordedAt                             time.Time
+}
+
 type Store interface {
 	Migrate(context.Context) error
 	UpsertClient(context.Context, Client) error
@@ -139,7 +150,28 @@ type Store interface {
 	SaveServingNode(context.Context, string, domain.ServingNode) error
 	RecordAudit(context.Context, AuditEvent) error
 	Recover(context.Context, time.Time) error
+	// Purge deletes terminal-state location_requests/location_results/
+	// audit_events past their retention cutoffs. It never touches
+	// location_history, which has its own, unbounded-by-default retention —
+	// see RecordHistory.
 	Purge(context.Context, time.Time, time.Time) error
+
+	// RecordHistory appends one location_history row for target from a
+	// just-completed result. Called on every completed request regardless
+	// of which adapter (REST or MLP) submitted it, so MLP's Historic
+	// Location Immediate service (hlir/hlia) can serve fixes obtained
+	// either way. Independent of and outliving location_requests/
+	// location_results, which Purge deletes on its own schedule — instead,
+	// each target's own history is self-pruning: only its most recent
+	// points are kept (see the sqlite implementation's
+	// maxHistoryPointsPerTarget).
+	RecordHistory(ctx context.Context, targetKind, targetValue string, v domain.Result) error
+	// QueryHistory returns location_history points for target recorded
+	// within [start, stop] (inclusive), oldest first, thinned so
+	// consecutive returned points are at least minInterval apart (zero
+	// disables thinning), then capped to at most limit points (zero means
+	// unlimited).
+	QueryHistory(ctx context.Context, targetKind, targetValue string, start, stop time.Time, minInterval time.Duration, limit int) ([]HistoryPoint, error)
 
 	// CreateSubscription generates and returns the subscription id; nothing
 	// external needs to predict it ahead of creation.

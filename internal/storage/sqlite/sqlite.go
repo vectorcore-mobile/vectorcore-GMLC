@@ -737,6 +737,84 @@ func (s *Store) CreateLocationReport(ctx context.Context, r storage.LocationRepo
 		r.ID, r.LCSReferenceNumber, r.LocationEvent, r.TargetKind, r.TargetValue, r.RawGAD, r.ECGI, r.AccuracyFulfilment, r.AgeOfLocationEstimate, r.RawVelocityEstimate, r.EUTRANPositioningData, utc(r.ReceivedAt))
 	return r, err
 }
+// maxHistoryPointsPerTarget caps location_history to the most recent N rows
+// per target. 3GPP TS 23.271 leaves history retention as a national-
+// regulation/operator decision, not something the protocol specifies (see
+// e.g. §9.1.4.3's "last known location" being a single most-recent slot),
+// so this is an operator-requested, hardcoded-for-now cap rather than a
+// value derived from any spec.
+const maxHistoryPointsPerTarget = 20
+
+func (s *Store) RecordHistory(ctx context.Context, targetKind, targetValue string, v domain.Result) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err = tx.ExecContext(ctx, "INSERT INTO location_history(id,target_kind,target_value,shape,latitude,longitude,uncertainty_meters,recorded_at) VALUES(?,?,?,?,?,?,?,?)",
+		uuid.NewString(), targetKind, targetValue, v.Shape, v.Latitude, v.Longitude, v.UncertaintyMeters, utc(v.CreatedAt)); err != nil {
+		return err
+	}
+	// Prune anything past the most recent maxHistoryPointsPerTarget rows for
+	// this target, oldest first.
+	if _, err = tx.ExecContext(ctx, "DELETE FROM location_history WHERE target_kind=? AND target_value=? AND id NOT IN (SELECT id FROM location_history WHERE target_kind=? AND target_value=? ORDER BY recorded_at DESC LIMIT ?)",
+		targetKind, targetValue, targetKind, targetValue, maxHistoryPointsPerTarget); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func (s *Store) QueryHistory(ctx context.Context, targetKind, targetValue string, start, stop time.Time, minInterval time.Duration, limit int) ([]storage.HistoryPoint, error) {
+	// A safety cap on rows fetched before thinning/limit are applied, well
+	// above any realistic no_of_reports request — guards against an
+	// unbounded scan for a long-lived target with no interval/limit given.
+	const maxScan = 10000
+	rows, err := s.db.QueryContext(ctx, "SELECT shape,latitude,longitude,uncertainty_meters,recorded_at FROM location_history WHERE target_kind=? AND target_value=? AND recorded_at>=? AND recorded_at<=? ORDER BY recorded_at ASC LIMIT ?",
+		targetKind, targetValue, utc(start), utc(stop), maxScan)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var all []storage.HistoryPoint
+	for rows.Next() {
+		var p storage.HistoryPoint
+		var lat, lon, uncertainty sql.NullFloat64
+		var recorded string
+		if err := rows.Scan(&p.Shape, &lat, &lon, &uncertainty, &recorded); err != nil {
+			return nil, err
+		}
+		if lat.Valid {
+			p.Latitude = &lat.Float64
+		}
+		if lon.Valid {
+			p.Longitude = &lon.Float64
+		}
+		if uncertainty.Valid {
+			p.UncertaintyMeters = &uncertainty.Float64
+		}
+		p.RecordedAt, _ = parseTime(recorded)
+		all = append(all, p)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	out := all
+	if minInterval > 0 {
+		out = out[:0]
+		var last time.Time
+		for _, p := range all {
+			if len(out) == 0 || p.RecordedAt.Sub(last) >= minInterval {
+				out = append(out, p)
+				last = p.RecordedAt
+			}
+		}
+	}
+	if limit > 0 && len(out) > limit {
+		out = out[:limit]
+	}
+	return out, nil
+}
+
 func (s *Store) Close(ctx context.Context) error {
 	_, _ = s.db.ExecContext(ctx, fmt.Sprintf("PRAGMA wal_checkpoint(TRUNCATE)"))
 	return s.db.Close()

@@ -20,7 +20,51 @@ type Config struct {
 	Diameter  Diameter  `yaml:"diameter"`
 	Logging   Logging   `yaml:"logging"`
 	Delivery  Delivery  `yaml:"delivery"`
-	LRR       LRR       `yaml:"lrr"`
+	LRR          LRR          `yaml:"lrr"`
+	MLP          MLP          `yaml:"mlp"`
+	MLPReporting MLPReporting `yaml:"mlp_reporting"`
+}
+
+// MLPReporting configures unsolicited MLP report pushes — slrep (Standard
+// Location Report, for MO-LR events) and emerep (Emergency Location
+// Report, for emergency call origination/release/handover events) — sent
+// by internal/mlp.Pusher, invoked from internal/lrr on qualifying inbound
+// TS 29.172 Location-Report-Requests. Disabled by default. Unlike MLP
+// itself (an inbound listener), this is purely outbound: MLP gives GMLC no
+// per-subscriber routing concept for a report nothing requested (see
+// docs/mlp-le-interface-plan.md's Phase D "start simple" decision), so
+// each report type has exactly one operator-configured destination, not a
+// routing table.
+type MLPReporting struct {
+	Enabled bool `yaml:"enabled"`
+	// StandardReportURL/StandardReportClientID: destination and the client
+	// identity GMLC presents in its own outbound hdr for slrep pushes.
+	// Both empty (the default) disables standard-report pushing even if
+	// Enabled is true.
+	StandardReportURL      string `yaml:"standard_report_url"`
+	StandardReportClientID string `yaml:"standard_report_client_id"`
+	// EmergencyReportURL/EmergencyReportClientID: same, for emerep pushes.
+	EmergencyReportURL      string        `yaml:"emergency_report_url"`
+	EmergencyReportClientID string        `yaml:"emergency_report_client_id"`
+	Timeout                 time.Duration `yaml:"timeout"`
+}
+
+// MLP configures the OMA MLP (Le interface) adapter — internal/mlp — a
+// second, independent HTTP listener alongside the REST/JSON one (see
+// Server.Enabled), not a replacement for it. Disabled by default: existing
+// deployments are unaffected until an operator opts in, matching the
+// Delivery/LRR precedent.
+type MLP struct {
+	Enabled       bool   `yaml:"enabled"`
+	ListenAddress string `yaml:"listen_address"`
+	// SyncWaitTimeout bounds how long a slir blocks waiting for a target to
+	// reach a terminal state when the client's own eqop/resp_timer doesn't
+	// say otherwise. MaxSyncWaitTimeout caps how long resp_timer itself may
+	// extend that wait to — a client can shorten the wait, never lengthen
+	// it past this.
+	SyncWaitTimeout    time.Duration `yaml:"sync_wait_timeout"`
+	MaxSyncWaitTimeout time.Duration `yaml:"max_sync_wait_timeout"`
+	ShutdownTimeout    time.Duration `yaml:"shutdown_timeout"`
 }
 
 // LRR gates inbound TS 29.172 Location-Report-Request handling. Disabled by
@@ -78,6 +122,12 @@ type DiameterPeer struct {
 	ExpectedOriginRealm string `yaml:"expected_origin_realm"`
 }
 type Server struct {
+	// Enabled gates the REST/JSON adapter (internal/httpapi). Defaults to
+	// true (applyDefaults) — it isn't being removed by MLP's arrival, this
+	// just gives an operator the lever to turn it off later once MLP is
+	// trusted, without a code change. Independent of MLP.Enabled: both,
+	// either, or neither may run at once (see docs/mlp-le-interface-plan.md).
+	Enabled         *bool         `yaml:"enabled"`
 	ListenAddress   string        `yaml:"listen_address"`
 	ShutdownTimeout time.Duration `yaml:"shutdown_timeout"`
 }
@@ -171,8 +221,24 @@ func Load(path string) (Config, error) {
 	return c, c.Validate()
 }
 func (c *Config) applyDefaults() {
+	if c.Server.Enabled == nil {
+		v := true
+		c.Server.Enabled = &v
+	}
 	if c.Server.ShutdownTimeout <= 0 {
 		c.Server.ShutdownTimeout = 10 * time.Second
+	}
+	if c.MLP.SyncWaitTimeout <= 0 {
+		c.MLP.SyncWaitTimeout = 20 * time.Second
+	}
+	if c.MLP.MaxSyncWaitTimeout <= 0 {
+		c.MLP.MaxSyncWaitTimeout = 60 * time.Second
+	}
+	if c.MLP.ShutdownTimeout <= 0 {
+		c.MLP.ShutdownTimeout = 10 * time.Second
+	}
+	if c.MLPReporting.Timeout <= 0 {
+		c.MLPReporting.Timeout = 10 * time.Second
 	}
 	if c.Database.BusyTimeout <= 0 {
 		c.Database.BusyTimeout = 5 * time.Second
@@ -222,8 +288,40 @@ func (c Config) Validate() error {
 	default:
 		return fmt.Errorf("logging.level must be debug, info, warn, or error")
 	}
-	if c.Server.ListenAddress == "" {
+	serverEnabled := c.Server.Enabled == nil || *c.Server.Enabled
+	if serverEnabled && c.Server.ListenAddress == "" {
 		return fmt.Errorf("server.listen_address is required")
+	}
+	if c.MLP.Enabled {
+		if c.MLP.ListenAddress == "" {
+			return fmt.Errorf("mlp.listen_address is required")
+		}
+		if serverEnabled && c.MLP.ListenAddress == c.Server.ListenAddress {
+			return fmt.Errorf("mlp.listen_address must differ from server.listen_address")
+		}
+		if c.MLP.SyncWaitTimeout <= 0 || c.MLP.MaxSyncWaitTimeout <= 0 || c.MLP.SyncWaitTimeout > c.MLP.MaxSyncWaitTimeout {
+			return fmt.Errorf("mlp sync wait timeouts must be positive, and sync_wait_timeout must not exceed max_sync_wait_timeout")
+		}
+		if c.MLP.ShutdownTimeout <= 0 {
+			return fmt.Errorf("mlp.shutdown_timeout must be positive")
+		}
+	}
+	if !serverEnabled && !c.MLP.Enabled {
+		return fmt.Errorf("at least one of server.enabled or mlp.enabled must be true")
+	}
+	if c.MLPReporting.Enabled {
+		if c.MLPReporting.StandardReportURL == "" && c.MLPReporting.EmergencyReportURL == "" {
+			return fmt.Errorf("mlp_reporting.enabled requires at least one of standard_report_url or emergency_report_url")
+		}
+		if (c.MLPReporting.StandardReportURL == "") != (c.MLPReporting.StandardReportClientID == "") {
+			return fmt.Errorf("mlp_reporting.standard_report_url and standard_report_client_id must be set together")
+		}
+		if (c.MLPReporting.EmergencyReportURL == "") != (c.MLPReporting.EmergencyReportClientID == "") {
+			return fmt.Errorf("mlp_reporting.emergency_report_url and emergency_report_client_id must be set together")
+		}
+		if c.MLPReporting.Timeout <= 0 {
+			return fmt.Errorf("mlp_reporting.timeout must be positive")
+		}
 	}
 	if c.Database.Path == "" {
 		return fmt.Errorf("database.path is required")

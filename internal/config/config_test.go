@@ -61,6 +61,104 @@ func TestDiameterPeerConfiguration(t *testing.T) {
 		t.Error("empty peers accepted")
 	}
 }
+func TestMLPConfigDisabledByDefaultNeedsNoListenAddress(t *testing.T) {
+	if err := loadText(t, validDiameter("    - {name: a, address: 'a:1', transport: tcp}\n")); err != nil {
+		t.Fatalf("mlp disabled by default should not require listen_address: %v", err)
+	}
+}
+func TestMLPConfigRequiresListenAddressWhenEnabled(t *testing.T) {
+	text := validDiameter("    - {name: a, address: 'a:1', transport: tcp}\n") + "mlp: {enabled: true}\n"
+	if err := loadText(t, text); err == nil {
+		t.Error("mlp.enabled without listen_address accepted")
+	}
+}
+func TestMLPConfigRejectsSameListenAddressAsServer(t *testing.T) {
+	text := validDiameter("    - {name: a, address: 'a:1', transport: tcp}\n") + `mlp: {enabled: true, listen_address: "127.0.0.1:1"}` + "\n"
+	if err := loadText(t, text); err == nil {
+		t.Error("mlp.listen_address colliding with server.listen_address accepted")
+	}
+}
+func TestMLPConfigValidWhenEnabledWithDistinctPort(t *testing.T) {
+	text := validDiameter("    - {name: a, address: 'a:1', transport: tcp}\n") + `mlp: {enabled: true, listen_address: "127.0.0.1:9210"}` + "\n"
+	c, err := func() (Config, error) {
+		p := filepath.Join(t.TempDir(), "gmlc.yaml")
+		if err := os.WriteFile(p, []byte(text), 0600); err != nil {
+			t.Fatal(err)
+		}
+		return Load(p)
+	}()
+	if err != nil {
+		t.Fatalf("valid mlp config rejected: %v", err)
+	}
+	if !c.MLP.Enabled || c.MLP.ListenAddress != "127.0.0.1:9210" {
+		t.Fatalf("mlp config not parsed: %#v", c.MLP)
+	}
+	if c.MLP.SyncWaitTimeout <= 0 || c.MLP.MaxSyncWaitTimeout <= 0 || c.MLP.ShutdownTimeout <= 0 {
+		t.Fatalf("mlp defaults not applied: %#v", c.MLP)
+	}
+	if c.Server.Enabled == nil || !*c.Server.Enabled {
+		t.Fatalf("server.enabled should default to true, got %#v", c.Server.Enabled)
+	}
+}
+func TestServerCanBeDisabledIfMLPEnabled(t *testing.T) {
+	text := validDiameter("    - {name: a, address: 'a:1', transport: tcp}\n") + "server: {enabled: false}\n" + `mlp: {enabled: true, listen_address: "127.0.0.1:9210"}` + "\n"
+	text = strings.Replace(text, `server: {listen_address: "127.0.0.1:1"}`+"\n", "", 1)
+	if err := loadText(t, text); err != nil {
+		t.Fatalf("server disabled with mlp enabled should be valid: %v", err)
+	}
+}
+func TestBothServerAndMLPDisabledIsInvalid(t *testing.T) {
+	text := strings.Replace(validDiameter("    - {name: a, address: 'a:1', transport: tcp}\n"), `server: {listen_address: "127.0.0.1:1"}`, "server: {enabled: false}", 1)
+	if err := loadText(t, text); err == nil {
+		t.Error("server and mlp both disabled accepted")
+	}
+}
+func TestMLPReportingDisabledByDefaultNeedsNoURLs(t *testing.T) {
+	if err := loadText(t, validDiameter("    - {name: a, address: 'a:1', transport: tcp}\n")); err != nil {
+		t.Fatalf("mlp_reporting disabled by default should not require any urls: %v", err)
+	}
+}
+func TestMLPReportingEnabledRequiresAtLeastOneReportURL(t *testing.T) {
+	text := validDiameter("    - {name: a, address: 'a:1', transport: tcp}\n") + "mlp_reporting: {enabled: true}\n"
+	if err := loadText(t, text); err == nil {
+		t.Error("mlp_reporting.enabled with no report urls accepted")
+	}
+}
+func TestMLPReportingRequiresURLAndClientIDTogether(t *testing.T) {
+	for _, tt := range []struct {
+		name, yaml string
+		ok         bool
+	}{
+		{"url without client id", `mlp_reporting: {enabled: true, standard_report_url: "http://x/"}`, false},
+		{"client id without url", `mlp_reporting: {enabled: true, standard_report_client_id: "c"}`, false},
+		{"both set", `mlp_reporting: {enabled: true, standard_report_url: "http://x/", standard_report_client_id: "c"}`, true},
+		{"emergency url without client id", `mlp_reporting: {enabled: true, emergency_report_url: "http://x/"}`, false},
+		{"emergency both set", `mlp_reporting: {enabled: true, emergency_report_url: "http://x/", emergency_report_client_id: "c"}`, true},
+	} {
+		text := validDiameter("    - {name: a, address: 'a:1', transport: tcp}\n") + tt.yaml + "\n"
+		err := loadText(t, text)
+		if (err == nil) != tt.ok {
+			t.Errorf("%s: err=%v, want ok=%v", tt.name, err, tt.ok)
+		}
+	}
+}
+func TestMLPReportingValidConfigParsesWithDefaultTimeout(t *testing.T) {
+	text := validDiameter("    - {name: a, address: 'a:1', transport: tcp}\n") + `mlp_reporting: {enabled: true, standard_report_url: "http://console.example/reports/standard", standard_report_client_id: "lcs-console"}` + "\n"
+	p := filepath.Join(t.TempDir(), "gmlc.yaml")
+	if err := os.WriteFile(p, []byte(text), 0600); err != nil {
+		t.Fatal(err)
+	}
+	c, err := Load(p)
+	if err != nil {
+		t.Fatalf("valid mlp_reporting config rejected: %v", err)
+	}
+	if !c.MLPReporting.Enabled || c.MLPReporting.StandardReportURL != "http://console.example/reports/standard" || c.MLPReporting.StandardReportClientID != "lcs-console" {
+		t.Fatalf("mlp_reporting config not parsed: %#v", c.MLPReporting)
+	}
+	if c.MLPReporting.Timeout <= 0 {
+		t.Fatalf("mlp_reporting.timeout default not applied: %#v", c.MLPReporting)
+	}
+}
 func TestHSSRealmDefaultsAndOverride(t *testing.T) {
 	p := filepath.Join(t.TempDir(), "gmlc.yaml")
 	if err := os.WriteFile(p, []byte(validDiameter("    - {name: a, address: 'a:1', transport: tcp}\n")), 0600); err != nil {

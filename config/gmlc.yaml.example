@@ -1,6 +1,43 @@
 server:
+  # enabled (optional, defaults to true): gates the REST/JSON Le adapter.
+  # Independent of mlp.enabled below — both, either, or neither may run;
+  # at least one must be true.
+  # enabled: true
   listen_address: "127.0.0.1:8086"
   shutdown_timeout: "10s"
+mlp:
+  # MLP is the OMA Mobile Location Protocol Le adapter (internal/mlp) ▒~@~T the
+  # actual standards-based interface the REST/JSON API above stands in for.
+  # It is a second, independent HTTP listener, not a replacement for the
+  # REST one (see server.enabled above). Disabled by default. Currently
+  # implements Standard Location Immediate Service (slir/slia) only ▒~@~T see
+  # docs/mlp-le-interface-plan.md for phased scope.
+  enabled: false
+  # 9210/tcp is the IANA-registered port for unencrypted MLP ("lif-mlp").
+  listen_address: "0.0.0.0:9210"
+  # How long a slir blocks waiting for every target to reach a terminal
+  # state when the client's own eqop/resp_timer doesn't say otherwise.
+  sync_wait_timeout: "20s"
+  # The most a client's own resp_timer may extend that wait to ▒~@~T a client
+  # can shorten the wait, never lengthen it past this.
+  max_sync_wait_timeout: "60s"
+  shutdown_timeout: "10s"
+mlp_reporting:
+  # mlp_reporting pushes unsolicited MLP reports (slrep for MO-LR, emerep
+  # for emergency call origination/release/handover) to a fixed,
+  # operator-configured LCS Client URL per report type, triggered by
+  # internal/lrr on qualifying inbound LRRs. Requires lrr.enabled above.
+  # There's no per-subscriber routing in MLP for a report nothing
+  # requested, so this is one destination per report type, not a table.
+  enabled: false
+  # standard_report_url/standard_report_client_id: both required together
+  # if set. Leave both empty to skip pushing slrep even if enabled: true.
+  standard_report_url: ""
+  standard_report_client_id: ""
+  # emergency_report_url/emergency_report_client_id: same, for emerep.
+  emergency_report_url: ""
+  emergency_report_client_id: ""
+  timeout: "10s"
 database:
   path: "/var/lib/vectorcore/gmlc/gmlc.db"
   busy_timeout: "5s"

@@ -16,13 +16,15 @@ import (
 
 	"github.com/fiorix/go-diameter/v4/diam"
 	"github.com/vectorcore/gmlc/internal/domain"
+	"github.com/vectorcore/gmlc/internal/mlp"
 	"github.com/vectorcore/gmlc/internal/slg"
 	"github.com/vectorcore/gmlc/internal/storage"
 )
 
 type Handler struct {
-	codec *slg.Provider
-	store storage.Store
+	codec  *slg.Provider
+	store  storage.Store
+	pusher *mlp.Pusher
 }
 
 // New builds an LRR handler. codec only needs OriginHost/OriginRealm — it is
@@ -31,6 +33,12 @@ type Handler struct {
 func New(codec *slg.Provider, s storage.Store) *Handler {
 	return &Handler{codec: codec, store: s}
 }
+
+// SetPusher wires MLP report pushing (slrep/emerep — see mlp.Pusher) into
+// LRR ingestion. Optional: a Handler with no pusher set behaves exactly as
+// before Phase D, matching internal/service's SetQueuedHook/SetCancelHook
+// convention. A nil argument re-disables pushing.
+func (h *Handler) SetPusher(p *mlp.Pusher) { h.pusher = p }
 
 // ServeDIAM implements diam.Handler, so *Handler can be registered directly
 // as an internal/diameter.RequestHandler.Handler.
@@ -64,6 +72,7 @@ func (h *Handler) ServeDIAM(c diam.Conn, m *diam.Message) {
 // after the fact, so a storage failure here is a GMLC-local problem, not a
 // protocol-level one.
 func (h *Handler) process(ctx context.Context, r domain.LocationReport) {
+	now := time.Now().UTC()
 	var correlated *byte
 	if r.LCSReferenceNumber != nil {
 		ref := *r.LCSReferenceNumber
@@ -85,12 +94,28 @@ func (h *Handler) process(ctx context.Context, r domain.LocationReport) {
 		AgeOfLocationEstimate: r.AgeOfLocationEstimate,
 		RawVelocityEstimate:   r.RawVelocityEstimate,
 		EUTRANPositioningData: r.EUTRANPositioningData,
-		ReceivedAt:            time.Now().UTC(),
+		ReceivedAt:            now,
 	}
 	if r.Target.IMSI != "" || r.Target.MSISDN != "" {
 		rep.TargetKind, rep.TargetValue = r.Target.Kind(), r.Target.Value()
 	}
 	if _, err := h.store.CreateLocationReport(ctx, rep); err != nil {
 		slog.Warn("location report persist failed", "location_event", r.LocationEvent, "error", err)
+	}
+	h.push(ctx, r, now)
+}
+
+// push forwards a qualifying report to h.pusher (nil/no-op if Phase D
+// pushing isn't configured — see SetPusher). Only the four Location-Event
+// values that are genuinely unsolicited from this GMLC's perspective (see
+// domain's own Location-Event doc comment) map to a push; every other
+// value (deferred/delayed reporting) has no MLP push counterpart and is
+// silently not pushed, same as it's silently never correlated today.
+func (h *Handler) push(ctx context.Context, r domain.LocationReport, now time.Time) {
+	switch r.LocationEvent {
+	case domain.LocationEventMOLR:
+		h.pusher.PushStandardReport(ctx, r.Target, r.Position, now)
+	case domain.LocationEventEmergencyCallOrigination, domain.LocationEventEmergencyCallRelease, domain.LocationEventEmergencyCallHandover:
+		h.pusher.PushEmergencyReport(ctx, r.Target, r.LocationEvent, r.Position, now)
 	}
 }

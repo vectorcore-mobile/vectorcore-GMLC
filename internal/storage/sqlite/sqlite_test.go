@@ -292,6 +292,134 @@ func TestPurgePurgesAuditEvents(t *testing.T) {
 		t.Fatalf("expected only the recent audit event to survive purge, got %d", count)
 	}
 }
+func TestQueryHistoryFiltersThinsAndOrders(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	lat1, lon1 := 1.0, 2.0
+	lat2, lon2 := 3.0, 4.0
+	lat3, lon3 := 5.0, 6.0
+	// Three fixes for the target under test, 30s apart, plus one for an
+	// unrelated target that must never leak into the query results.
+	if e := s.RecordHistory(ctx, "imsi", "00101", domain.Result{Latitude: &lat1, Longitude: &lon1, Shape: "ellipsoid_point", CreatedAt: base}); e != nil {
+		t.Fatal(e)
+	}
+	if e := s.RecordHistory(ctx, "imsi", "00101", domain.Result{Latitude: &lat2, Longitude: &lon2, Shape: "ellipsoid_point", CreatedAt: base.Add(30 * time.Second)}); e != nil {
+		t.Fatal(e)
+	}
+	if e := s.RecordHistory(ctx, "imsi", "00101", domain.Result{Latitude: &lat3, Longitude: &lon3, Shape: "ellipsoid_point", CreatedAt: base.Add(60 * time.Second)}); e != nil {
+		t.Fatal(e)
+	}
+	if e := s.RecordHistory(ctx, "imsi", "99999", domain.Result{Latitude: &lat1, Longitude: &lon1, Shape: "ellipsoid_point", CreatedAt: base}); e != nil {
+		t.Fatal(e)
+	}
+
+	points, e := s.QueryHistory(ctx, "imsi", "00101", base.Add(-time.Minute), base.Add(time.Hour), 0, 0)
+	if e != nil {
+		t.Fatal(e)
+	}
+	if len(points) != 3 {
+		t.Fatalf("expected 3 points, got %d: %+v", len(points), points)
+	}
+	if !points[0].RecordedAt.Equal(base) || *points[0].Latitude != 1 {
+		t.Fatalf("expected oldest-first ordering, got %+v", points[0])
+	}
+	if !points[2].RecordedAt.Equal(base.Add(60 * time.Second)) {
+		t.Fatalf("expected newest last, got %+v", points[2])
+	}
+
+	// A window excluding the third fix returns only the first two.
+	windowed, e := s.QueryHistory(ctx, "imsi", "00101", base, base.Add(45*time.Second), 0, 0)
+	if e != nil {
+		t.Fatal(e)
+	}
+	if len(windowed) != 2 {
+		t.Fatalf("expected 2 points in narrower window, got %d", len(windowed))
+	}
+
+	// minInterval=60s should thin the middle (30s-spaced) point away,
+	// keeping only the first and third.
+	thinned, e := s.QueryHistory(ctx, "imsi", "00101", base.Add(-time.Minute), base.Add(time.Hour), 60*time.Second, 0)
+	if e != nil {
+		t.Fatal(e)
+	}
+	if len(thinned) != 2 || *thinned[0].Latitude != 1 || *thinned[1].Latitude != 5 {
+		t.Fatalf("expected thinning to keep first+third only, got %+v", thinned)
+	}
+
+	// limit=1 caps the (unthinned) result to the oldest point.
+	limited, e := s.QueryHistory(ctx, "imsi", "00101", base.Add(-time.Minute), base.Add(time.Hour), 0, 1)
+	if e != nil {
+		t.Fatal(e)
+	}
+	if len(limited) != 1 || *limited[0].Latitude != 1 {
+		t.Fatalf("expected limit to cap to 1 oldest point, got %+v", limited)
+	}
+}
+
+func TestRecordHistoryCapsAtMostRecentPointsPerTarget(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	const total = 25
+	for i := 0; i < total; i++ {
+		lat, lon := float64(i), float64(i)
+		if e := s.RecordHistory(ctx, "imsi", "00101", domain.Result{Latitude: &lat, Longitude: &lon, Shape: "ellipsoid_point", CreatedAt: base.Add(time.Duration(i) * time.Minute)}); e != nil {
+			t.Fatal(e)
+		}
+	}
+	points, e := s.QueryHistory(ctx, "imsi", "00101", base.Add(-time.Hour), base.Add(24*time.Hour), 0, 0)
+	if e != nil {
+		t.Fatal(e)
+	}
+	if len(points) != maxHistoryPointsPerTarget {
+		t.Fatalf("expected exactly %d retained points, got %d", maxHistoryPointsPerTarget, len(points))
+	}
+	// The oldest total-maxHistoryPointsPerTarget entries should have been
+	// pruned, leaving only the most recent maxHistoryPointsPerTarget —
+	// i.e. lat/lon values [total-maxHistoryPointsPerTarget, total).
+	wantFirst := float64(total - maxHistoryPointsPerTarget)
+	if *points[0].Latitude != wantFirst {
+		t.Fatalf("oldest surviving point = %v, want %v (older points should have been pruned)", *points[0].Latitude, wantFirst)
+	}
+	if *points[len(points)-1].Latitude != float64(total-1) {
+		t.Fatalf("newest surviving point = %v, want %v", *points[len(points)-1].Latitude, total-1)
+	}
+
+	// A different target's own points must be unaffected by the cap.
+	lat, lon := 99.0, 99.0
+	if e := s.RecordHistory(ctx, "imsi", "99999", domain.Result{Latitude: &lat, Longitude: &lon, Shape: "ellipsoid_point", CreatedAt: base}); e != nil {
+		t.Fatal(e)
+	}
+	other, e := s.QueryHistory(ctx, "imsi", "99999", base.Add(-time.Hour), base.Add(24*time.Hour), 0, 0)
+	if e != nil {
+		t.Fatal(e)
+	}
+	if len(other) != 1 {
+		t.Fatalf("expected the unrelated target's own single point to survive untouched, got %d", len(other))
+	}
+}
+
+func TestPurgeDoesNotTouchLocationHistory(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	lat, lon := 1.0, 2.0
+	old := time.Now().Add(-90 * 24 * time.Hour)
+	if e := s.RecordHistory(ctx, "imsi", "00101", domain.Result{Latitude: &lat, Longitude: &lon, Shape: "ellipsoid_point", CreatedAt: old}); e != nil {
+		t.Fatal(e)
+	}
+	if e := s.Purge(ctx, time.Now(), time.Now()); e != nil {
+		t.Fatal(e)
+	}
+	points, e := s.QueryHistory(ctx, "imsi", "00101", old.Add(-time.Hour), time.Now(), 0, 0)
+	if e != nil {
+		t.Fatal(e)
+	}
+	if len(points) != 1 {
+		t.Fatalf("expected Purge to leave location_history untouched, got %d points", len(points))
+	}
+}
+
 func TestConcurrentRequestCreationAndForeignKey(t *testing.T) {
 	s := testStore(t)
 	ctx := context.Background()
