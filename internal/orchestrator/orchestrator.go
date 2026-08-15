@@ -179,7 +179,7 @@ func (w *Worker) one(ctx context.Context) bool {
 	}
 	// A successful PLA carrying neither a location estimate nor additional
 	// information (deferred/no-immediate-result) must never complete the
-	// REST request — there is no positioning result to hand back.
+	// request — there is no positioning result to hand back.
 	if out.Kind == "no_immediate_result" || out.Kind == "deferred" {
 		slog.Warn("location request produced no immediate result", "request_id", r.ID, "kind", out.Kind)
 		if e := w.store.FailRequest(context.Background(), r.ID, domain.StateLocating, "no_immediate_result", "PLA returned no immediate positioning result"); e == nil {

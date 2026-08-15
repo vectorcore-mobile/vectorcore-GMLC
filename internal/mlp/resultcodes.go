@@ -39,13 +39,10 @@ var (
 // one — out of scope for this phase; POSITION METHOD FAILURE (6) is the
 // honest fallback until it exists.
 
-// errorToResultCode maps a service/storage/auth error to an MLP §5.4
-// resid, mirroring internal/httpapi/api.go's mapErr for the equivalent
-// REST-side cases rather than re-deriving the mapping from scratch. Only
-// errors known to originate from client-supplied input get a specific
+// errorToResultCode maps a service/storage/auth error to an MLP §5.4 resid.
+// Only errors known to originate from client-supplied input get a specific
 // code; anything else (unexpected backend failure) maps to SYSTEM FAILURE
-// so internal error detail is never disclosed on the wire, matching
-// mapErr's own default-500 reasoning.
+// so internal error detail is never disclosed on the wire.
 func errorToResultCode(err error) resultCode {
 	switch {
 	case errors.Is(err, auth.ErrUnauthenticated):

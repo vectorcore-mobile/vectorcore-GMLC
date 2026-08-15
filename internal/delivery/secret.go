@@ -1,9 +1,10 @@
 // Package delivery is the shared "something happened later, tell an
 // external party" primitive: an HTTP-callback outbox worker used by both
-// deferred/periodic location reports (LRR) and REST-async result delivery,
-// which otherwise reduce to the same problem. It's deliberately independent
-// of internal/orchestrator's Diameter-facing worker — see Worker's own doc
-// comment for why that separation matters, not just for package layering.
+// deferred/periodic location reports (LRR) and async-completion result
+// delivery, which otherwise reduce to the same problem. It's deliberately
+// independent of internal/orchestrator's Diameter-facing worker — see
+// Worker's own doc comment for why that separation matters, not just for
+// package layering.
 package delivery
 
 import (

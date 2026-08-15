@@ -1,9 +1,9 @@
 // Package mlp implements the OMA Mobile Location Protocol (MLP) v3.5 Le
-// interface adapter, sitting beside internal/httpapi's REST/JSON adapter on
-// the same protocol-neutral internal/service.Service core. This file holds
-// the wire (XML) types. It is deliberately not a transcription of the full
-// spec DTD — only the Standard Location Immediate Service (slir/slia) and
-// General Error Message (gem) elements this phase implements are modeled.
+// interface adapter, built on the protocol-neutral internal/service.Service
+// core. This file holds the wire (XML) types. It is deliberately not a
+// transcription of the full spec DTD — only the Standard Location Immediate
+// Service (slir/slia) and General Error Message (gem) elements this phase
+// implements are modeled.
 // See docs/mlp-le-interface-plan.md for the phased scope.
 package mlp
 

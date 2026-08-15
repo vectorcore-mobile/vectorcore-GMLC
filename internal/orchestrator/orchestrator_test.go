@@ -183,7 +183,7 @@ func TestWorkerUsesClientConfiguredLCSClientType(t *testing.T) {
 // resolved from the client's own operator-configured record, exactly like
 // LCS-Client-Type — never influenced by anything on the stored request
 // itself (there is no PrivacyCheck field on domain.Request/SubmitInput at
-// all; the REST API has no way to set it), since it governs the target
+// all; no adapter has a way to set it), since it governs the target
 // subscriber's privacy protection, not the requesting client's own request.
 func TestWorkerUsesClientConfiguredPrivacyCheck(t *testing.T) {
 	s := store(t)
@@ -278,7 +278,7 @@ func TestWorkerCompletionHookFiresOnSuccessAndFailure(t *testing.T) {
 // non-additive change: every successful completion — not just MLP-
 // originated ones — must populate location_history so MLP's Historic
 // Location Immediate service (hlir/hlia) can serve fixes obtained via any
-// adapter, including this REST-style path exercised by fakeProvider.
+// completion path, including the one exercised by fakeProvider.
 func TestWorkerRecordsLocationHistoryOnCompletion(t *testing.T) {
 	s := store(t)
 	defer s.Close(context.Background())

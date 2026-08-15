@@ -22,4 +22,3 @@ fuzz-smoke:
 	go test ./internal/slh -run=^$$ -fuzz=FuzzEncodeMSISDN -fuzztime=$(FUZZ_TIME)
 	go test ./internal/slg -run=^$$ -fuzz=FuzzDecodePLA -fuzztime=$(FUZZ_TIME)
 	go test ./internal/slg -run=^$$ -fuzz=FuzzDecodeLRR -fuzztime=$(FUZZ_TIME)
-	go test ./internal/httpapi -run=^$$ -fuzz=FuzzLocationRequestJSON -fuzztime=$(FUZZ_TIME)

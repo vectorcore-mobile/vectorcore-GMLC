@@ -1,18 +1,8 @@
-server:
-  # enabled (optional, defaults to true): gates the REST/JSON Le adapter.
-  # Independent of mlp.enabled below — both, either, or neither may run;
-  # at least one must be true.
-  # enabled: true
-  listen_address: "127.0.0.1:8086"
-  shutdown_timeout: "10s"
 mlp:
-  # MLP is the OMA Mobile Location Protocol Le adapter (internal/mlp) ▒~@~T the
-  # actual standards-based interface the REST/JSON API above stands in for.
-  # It is a second, independent HTTP listener, not a replacement for the
-  # REST one (see server.enabled above). Disabled by default. Currently
-  # implements Standard Location Immediate Service (slir/slia) only ▒~@~T see
-  # docs/mlp-le-interface-plan.md for phased scope.
-  enabled: false
+  # MLP is the OMA Mobile Location Protocol Le adapter (internal/mlp) — the
+  # GMLC's Le listener, always on. Currently implements Standard Location
+  # Immediate Service (slir/slia) only — see docs/mlp-le-interface-plan.md
+  # for phased scope.
   # 9210/tcp is the IANA-registered port for unencrypted MLP ("lif-mlp").
   listen_address: "0.0.0.0:9210"
   # How long a slir blocks waiting for every target to reach a terminal
@@ -83,14 +73,14 @@ clients:
     services: ["immediate"]
     target_prefixes: ["001", "311435"]
     # lcs_client_type (TS 29.172 LCS-Client-Type, operator-set only — never
-    # exposed via the REST API): emergency_services, value_added_services
+    # exposed to the client): emergency_services, value_added_services
     # (default), plmn_operator_services, lawful_intercept_services.
     # emergency_services/lawful_intercept_services carry regulatory weight
     # downstream at the MME/HSS; only assign them to clients you trust for
     # that purpose.
     lcs_client_type: "value_added_services"
     # lcs_privacy_check (TS 29.172 LCS-Privacy-Check, operator-set only —
-    # never exposed via the REST API): allowed_without_notification
+    # never exposed to the client): allowed_without_notification
     # (default), allowed_with_notification, allowed_if_no_response,
     # restricted_if_no_response, not_allowed. Governs whether/how the
     # target subscriber is notified or consulted before disclosure — this
@@ -98,9 +88,9 @@ clients:
     # be settable by the caller.
     lcs_privacy_check: "allowed_without_notification"
 delivery:
-  # Delivery is optional; enable it once something needs to consume it (LRR
-  # deferred reports, REST async-completion callbacks). Both are outbound
-  # webhook POSTs signed with HMAC-SHA256 (X-GMLC-Signature: sha256=<hex>).
+  # Delivery is optional; enable it once something needs to consume it (a
+  # submitted request's async-completion callback). Outbound webhook POSTs
+  # signed with HMAC-SHA256 (X-GMLC-Signature: sha256=<hex>).
   enabled: false
   max_attempts: 5
   retry_backoff_min: "1s"

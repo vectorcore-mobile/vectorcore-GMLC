@@ -85,8 +85,8 @@ const (
 
 	// ResponseTimeLowDelay/ResponseTimeDelayTolerant and QoSClassAssured/
 	// QoSClassBestEffort alias domain's versions — same reasoning as
-	// LocationCurrent above: the REST layer needs these to translate its
-	// QoS JSON object without importing internal/slg.
+	// LocationCurrent above: adapter layers need these to translate their
+	// own QoS representations without importing internal/slg.
 	ResponseTimeLowDelay      = domain.ResponseTimeLowDelay
 	ResponseTimeDelayTolerant = domain.ResponseTimeDelayTolerant
 	QoSClassAssured           = domain.QoSClassAssured
@@ -106,8 +106,8 @@ const (
 
 	// LocationCurrent/LocationCurrentOrLastKnown alias domain.LocationCurrent/
 	// domain.LocationCurrentOrLastKnown so existing internal/slg references
-	// don't need to change; domain is the canonical source (REST layer needs
-	// these values too, and must not import internal/slg to get them).
+	// don't need to change; domain is the canonical source (adapter layers
+	// need these values too, and must not import internal/slg to get them).
 	LocationCurrent                   = domain.LocationCurrent
 	LocationCurrentOrLastKnown        = domain.LocationCurrentOrLastKnown
 	ExperimentalUserUnknown    uint32 = 5001

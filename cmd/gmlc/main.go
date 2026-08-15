@@ -17,7 +17,6 @@ import (
 	"github.com/vectorcore/gmlc/internal/delivery"
 	vcdiam "github.com/vectorcore/gmlc/internal/diameter"
 	"github.com/vectorcore/gmlc/internal/domain"
-	"github.com/vectorcore/gmlc/internal/httpapi"
 	"github.com/vectorcore/gmlc/internal/logging"
 	"github.com/vectorcore/gmlc/internal/lrr"
 	"github.com/vectorcore/gmlc/internal/mlp"
@@ -149,7 +148,7 @@ func main() {
 		if r.SubscriptionID == nil {
 			return
 		}
-		payload, err := json.Marshal(httpapi.RequestJSON(r, v))
+		payload, err := json.Marshal(delivery.RequestJSON(r, v))
 		if err != nil {
 			slog.Warn("callback payload marshal failed", "request_id", r.ID, "error", err)
 			return
@@ -166,43 +165,20 @@ func main() {
 		deliveryWorker = delivery.New(st, delivery.Config{MaxAttempts: cfg.Delivery.MaxAttempts, RetryBackoffMin: cfg.Delivery.RetryBackoffMin, RetryBackoffMax: cfg.Delivery.RetryBackoffMax, RequestTimeout: cfg.Delivery.RequestTimeout, EncryptionKey: deliveryKey})
 		deliveryWorker.Start(ctx)
 	}
-	// REST and MLP are two independent listeners on two different ports, not
-	// mutually exclusive — either, both, or (briefly, during a supervised
-	// transition) neither may run; config.Validate already rejects both
-	// being disabled at once. Gate, don't delete: REST isn't being removed
-	// by MLP's arrival (see docs/mlp-le-interface-plan.md).
-	var server *http.Server
-	if cfg.Server.Enabled == nil || *cfg.Server.Enabled {
-		server = &http.Server{Addr: cfg.Server.ListenAddress, Handler: httpapi.New(svc, registry.OverallReady), ReadHeaderTimeout: 5 * time.Second}
-		go func() {
-			slog.Info("gmlc listening", "address", cfg.Server.ListenAddress)
-			if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-				slog.Error("http server failed", "error", err)
-			}
-		}()
-	}
-	var mlpServer *http.Server
-	if cfg.MLP.Enabled {
-		mlpServer = &http.Server{Addr: cfg.MLP.ListenAddress, Handler: mlp.New(svc, cfg.MLP.SyncWaitTimeout, cfg.MLP.MaxSyncWaitTimeout), ReadHeaderTimeout: 5 * time.Second}
-		go func() {
-			slog.Info("gmlc mlp listening", "address", cfg.MLP.ListenAddress)
-			if err := mlpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-				slog.Error("mlp http server failed", "error", err)
-			}
-		}()
-	}
+	mlpServer := &http.Server{Addr: cfg.MLP.ListenAddress, Handler: mlp.New(svc, cfg.MLP.SyncWaitTimeout, cfg.MLP.MaxSyncWaitTimeout), ReadHeaderTimeout: 5 * time.Second}
+	go func() {
+		slog.Info("gmlc mlp listening", "address", cfg.MLP.ListenAddress)
+		if err := mlpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			slog.Error("mlp http server failed", "error", err)
+		}
+	}()
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
 	<-sig
-	stop, cancel := context.WithTimeout(context.Background(), cfg.Server.ShutdownTimeout)
+	stop, cancel := context.WithTimeout(context.Background(), cfg.MLP.ShutdownTimeout)
 	defer cancel()
 	close(purgeStop)
-	if server != nil {
-		_ = server.Shutdown(stop)
-	}
-	if mlpServer != nil {
-		_ = mlpServer.Shutdown(stop)
-	}
+	_ = mlpServer.Shutdown(stop)
 	_ = worker.Close(stop)
 	if deliveryWorker != nil {
 		_ = deliveryWorker.Close(stop)

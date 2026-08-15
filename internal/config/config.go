@@ -13,13 +13,12 @@ import (
 )
 
 type Config struct {
-	Server    Server    `yaml:"server"`
-	Database  Database  `yaml:"database"`
-	Retention Retention `yaml:"retention"`
-	Clients   []Client  `yaml:"clients"`
-	Diameter  Diameter  `yaml:"diameter"`
-	Logging   Logging   `yaml:"logging"`
-	Delivery  Delivery  `yaml:"delivery"`
+	Database     Database     `yaml:"database"`
+	Retention    Retention    `yaml:"retention"`
+	Clients      []Client     `yaml:"clients"`
+	Diameter     Diameter     `yaml:"diameter"`
+	Logging      Logging      `yaml:"logging"`
+	Delivery     Delivery     `yaml:"delivery"`
 	LRR          LRR          `yaml:"lrr"`
 	MLP          MLP          `yaml:"mlp"`
 	MLPReporting MLPReporting `yaml:"mlp_reporting"`
@@ -49,13 +48,11 @@ type MLPReporting struct {
 	Timeout                 time.Duration `yaml:"timeout"`
 }
 
-// MLP configures the OMA MLP (Le interface) adapter — internal/mlp — a
-// second, independent HTTP listener alongside the REST/JSON one (see
-// Server.Enabled), not a replacement for it. Disabled by default: existing
-// deployments are unaffected until an operator opts in, matching the
-// Delivery/LRR precedent.
+// MLP configures the OMA MLP (Le interface) adapter — internal/mlp — the
+// GMLC's Le listener. It is the GMLC's only way to receive location
+// requests, so unlike Delivery/LRR it is not independently toggleable —
+// listen_address is always required.
 type MLP struct {
-	Enabled       bool   `yaml:"enabled"`
 	ListenAddress string `yaml:"listen_address"`
 	// SyncWaitTimeout bounds how long a slir blocks waiting for a target to
 	// reach a terminal state when the client's own eqop/resp_timer doesn't
@@ -77,10 +74,11 @@ type LRR struct {
 	Enabled bool `yaml:"enabled"`
 }
 
-// Delivery configures the shared HTTP-callback outbox worker (internal/delivery)
-// used by both LRR deferred-report delivery and REST-async completion
-// delivery. Disabled by default: a GMLC that never enables it has no
-// callback secrets to protect and no encryption key requirement.
+// Delivery configures the shared HTTP-callback outbox worker
+// (internal/delivery), used for async-completion delivery of a request that
+// registered a callback at submit time. Disabled by default: a GMLC that
+// never enables it has no callback secrets to protect and no encryption key
+// requirement.
 type Delivery struct {
 	Enabled         bool          `yaml:"enabled"`
 	MaxAttempts     int           `yaml:"max_attempts"`
@@ -121,16 +119,6 @@ type DiameterPeer struct {
 	ExpectedOriginHost  string `yaml:"expected_origin_host"`
 	ExpectedOriginRealm string `yaml:"expected_origin_realm"`
 }
-type Server struct {
-	// Enabled gates the REST/JSON adapter (internal/httpapi). Defaults to
-	// true (applyDefaults) — it isn't being removed by MLP's arrival, this
-	// just gives an operator the lever to turn it off later once MLP is
-	// trusted, without a code change. Independent of MLP.Enabled: both,
-	// either, or neither may run at once (see docs/mlp-le-interface-plan.md).
-	Enabled         *bool         `yaml:"enabled"`
-	ListenAddress   string        `yaml:"listen_address"`
-	ShutdownTimeout time.Duration `yaml:"shutdown_timeout"`
-}
 type Database struct {
 	Path            string        `yaml:"path"`
 	BusyTimeout     time.Duration `yaml:"busy_timeout"`
@@ -148,15 +136,15 @@ type Client struct {
 	Services       []domain.ServiceType `yaml:"services"`
 	TargetPrefixes []string             `yaml:"target_prefixes"`
 	// LCSClientType selects the TS 29.172 LCS-Client-Type this client's
-	// requests are tagged with. Operator-controlled only — never settable via
-	// the REST API — since EMERGENCY_SERVICES/LAWFUL_INTERCEPT_SERVICES carry
+	// requests are tagged with. Operator-controlled only — never settable by
+	// the client — since EMERGENCY_SERVICES/LAWFUL_INTERCEPT_SERVICES carry
 	// regulatory weight downstream. One of: emergency_services,
 	// value_added_services (default), plmn_operator_services,
 	// lawful_intercept_services.
 	LCSClientType string `yaml:"lcs_client_type"`
 	// LCSPrivacyCheck selects the TS 29.172 LCS-Privacy-Check sent for this
-	// client's requests. Operator-controlled only — never settable via the
-	// REST API — since it governs the target subscriber's own privacy
+	// client's requests. Operator-controlled only — never settable by the
+	// client — since it governs the target subscriber's own privacy
 	// protection, not anything about the requesting client. One of:
 	// allowed_without_notification (default), allowed_with_notification,
 	// allowed_if_no_response, restricted_if_no_response, not_allowed.
@@ -221,13 +209,6 @@ func Load(path string) (Config, error) {
 	return c, c.Validate()
 }
 func (c *Config) applyDefaults() {
-	if c.Server.Enabled == nil {
-		v := true
-		c.Server.Enabled = &v
-	}
-	if c.Server.ShutdownTimeout <= 0 {
-		c.Server.ShutdownTimeout = 10 * time.Second
-	}
 	if c.MLP.SyncWaitTimeout <= 0 {
 		c.MLP.SyncWaitTimeout = 20 * time.Second
 	}
@@ -288,26 +269,14 @@ func (c Config) Validate() error {
 	default:
 		return fmt.Errorf("logging.level must be debug, info, warn, or error")
 	}
-	serverEnabled := c.Server.Enabled == nil || *c.Server.Enabled
-	if serverEnabled && c.Server.ListenAddress == "" {
-		return fmt.Errorf("server.listen_address is required")
+	if c.MLP.ListenAddress == "" {
+		return fmt.Errorf("mlp.listen_address is required")
 	}
-	if c.MLP.Enabled {
-		if c.MLP.ListenAddress == "" {
-			return fmt.Errorf("mlp.listen_address is required")
-		}
-		if serverEnabled && c.MLP.ListenAddress == c.Server.ListenAddress {
-			return fmt.Errorf("mlp.listen_address must differ from server.listen_address")
-		}
-		if c.MLP.SyncWaitTimeout <= 0 || c.MLP.MaxSyncWaitTimeout <= 0 || c.MLP.SyncWaitTimeout > c.MLP.MaxSyncWaitTimeout {
-			return fmt.Errorf("mlp sync wait timeouts must be positive, and sync_wait_timeout must not exceed max_sync_wait_timeout")
-		}
-		if c.MLP.ShutdownTimeout <= 0 {
-			return fmt.Errorf("mlp.shutdown_timeout must be positive")
-		}
+	if c.MLP.SyncWaitTimeout <= 0 || c.MLP.MaxSyncWaitTimeout <= 0 || c.MLP.SyncWaitTimeout > c.MLP.MaxSyncWaitTimeout {
+		return fmt.Errorf("mlp sync wait timeouts must be positive, and sync_wait_timeout must not exceed max_sync_wait_timeout")
 	}
-	if !serverEnabled && !c.MLP.Enabled {
-		return fmt.Errorf("at least one of server.enabled or mlp.enabled must be true")
+	if c.MLP.ShutdownTimeout <= 0 {
+		return fmt.Errorf("mlp.shutdown_timeout must be positive")
 	}
 	if c.MLPReporting.Enabled {
 		if c.MLPReporting.StandardReportURL == "" && c.MLPReporting.EmergencyReportURL == "" {

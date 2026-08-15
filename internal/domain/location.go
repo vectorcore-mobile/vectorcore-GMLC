@@ -35,7 +35,7 @@ const (
 
 // LCS-Privacy-Check values (TS 29.172 7.4.14). Like LCS-Client-Type, this is
 // an operator-configured, per-client attribute resolved server-side — never
-// settable via the REST API. It governs whether/how the target subscriber
+// settable by the client. It governs whether/how the target subscriber
 // is notified or consulted before their location is disclosed, so letting a
 // caller set it themselves would let any LCS client bypass the subscriber's
 // own privacy protection.

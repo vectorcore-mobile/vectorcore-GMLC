@@ -16,17 +16,14 @@ import (
 	"github.com/vectorcore/gmlc/internal/storage"
 )
 
-// maxBodyBytes bounds the request body the same way internal/httpapi does
-// (1<<20) — MLP bodies are small XML documents, not bulk payloads.
+// maxBodyBytes bounds the request body — MLP bodies are small XML
+// documents, not bulk payloads.
 const maxBodyBytes = 1 << 20
 
 // Handler implements the MLP Le adapter: decode slir → validate → submit
-// via the same service.Service core internal/httpapi uses → block
-// (SYNC-only, this phase) until every target reaches a terminal state or a
-// bounded deadline passes → encode slia. It is intentionally a distinct
-// http.Handler on its own listener (see cmd/gmlc/main.go), not a route
-// under internal/httpapi's mux — see docs/mlp-le-interface-plan.md's
-// "Decisions made with the user".
+// via internal/service.Service → block (SYNC-only, this phase) until every
+// target reaches a terminal state or a bounded deadline passes → encode
+// slia. See docs/mlp-le-interface-plan.md's "Decisions made with the user".
 type Handler struct {
 	svc *service.Service
 	// syncWaitDefault/syncWaitMax bound how long a request blocks waiting
@@ -110,8 +107,7 @@ func (h *Handler) handleEMELIR(w http.ResponseWriter, ctx context.Context, heade
 // (§5.2.3.8). Unlike handleSLIR/handleEMELIR, this never submits a new
 // positioning attempt — there is no service.Submit call — it's a pure read
 // against location_history, already populated by internal/orchestrator on
-// every completed request (MLP- or REST-submitted). See
-// service.Service.QueryHistory.
+// every completed request. See service.Service.QueryHistory.
 func (h *Handler) handleHLIR(w http.ResponseWriter, ctx context.Context, header hdr, req hlir) {
 	clientID, token := credentialsFromHdr(header)
 	if rc := validateGeoInfo(req.GeoInfo); rc != nil {
@@ -284,9 +280,9 @@ func (h *Handler) waitDeadline(respTimer time.Duration) time.Time {
 	return h.now().Add(wait)
 }
 
-// awaitTerminal polls the same read path internal/httpapi's own GET
-// endpoint uses (service.Service.GetResult) until the request reaches a
-// terminal state or deadline passes. This is the "bounded poll loop"
+// awaitTerminal polls the same read path (service.Service.GetResult) used
+// to look up a request's status, until the request reaches a terminal
+// state or deadline passes. This is the "bounded poll loop"
 // decision recorded in docs/mlp-le-interface-plan.md — reusing an existing
 // read rather than adding new orchestrator completion-notification
 // plumbing.
@@ -322,7 +318,7 @@ func credentialsFromHdr(h hdr) (clientID, token string) {
 // to domain.Targets. Any single unsupported msid type fails the whole
 // request (a whole-request-level result, not a per-target poserr) — this
 // mirrors internal/service.SubmitBatch's own fail-fast, all-or-nothing
-// validation for the REST API's batch path.
+// validation.
 func extractTargetsFrom(m *msids) ([]domain.Target, *resultCode, string) {
 	if m == nil || len(m.Msid) == 0 {
 		rc := resultFormatError
@@ -379,7 +375,7 @@ func parseLocType(lt *locType) (uint32, *resultCode) {
 
 // parsePrio maps prio's type attribute to TS 29.172 LCS-Priority (7.4.5):
 // 0 = highest priority, all other values (including absent, meaning
-// NORMAL) omit the AVP entirely — matching internal/httpapi's own
+// NORMAL) omit the AVP entirely — matching service.SubmitInput's own
 // Priority *uint32 semantics exactly.
 func parsePrio(p *prio) *uint32 {
 	if p != nil && p.Type == "HIGH" {

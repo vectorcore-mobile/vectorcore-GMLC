@@ -34,7 +34,7 @@ type AuditEvent struct {
 }
 
 // Subscription registers where and how to deliver a payload for a client —
-// shared by both deferred-report delivery (LRR) and REST-async completion
+// shared by both deferred-report delivery (LRR) and async-completion
 // delivery, which otherwise reduce to the same "something happened later,
 // tell an external party" problem. CallbackSecret is opaque ciphertext at
 // this layer; internal/delivery owns encrypting/decrypting it, storage just
@@ -157,10 +157,9 @@ type Store interface {
 	Purge(context.Context, time.Time, time.Time) error
 
 	// RecordHistory appends one location_history row for target from a
-	// just-completed result. Called on every completed request regardless
-	// of which adapter (REST or MLP) submitted it, so MLP's Historic
-	// Location Immediate service (hlir/hlia) can serve fixes obtained
-	// either way. Independent of and outliving location_requests/
+	// just-completed result. Called on every completed request, so MLP's
+	// Historic Location Immediate service (hlir/hlia) can serve any
+	// previously-obtained fix. Independent of and outliving location_requests/
 	// location_results, which Purge deletes on its own schedule — instead,
 	// each target's own history is self-pruning: only its most recent
 	// points are kept (see the sqlite implementation's
@@ -179,10 +178,10 @@ type Store interface {
 	GetSubscription(context.Context, string) (Subscription, error)
 	GetDelivery(context.Context, string) (Delivery, error)
 	// CreateDelivery enqueues one pending outbox entry for the given
-	// subscription. The caller (LRR ingestion, REST completion hook)
-	// already knows the subscription id; storage never looks one up on its
-	// own, so this can't accidentally deliver to the wrong client's
-	// callback.
+	// subscription. The caller (LRR ingestion, the orchestrator's
+	// completion hook) already knows the subscription id; storage never
+	// looks one up on its own, so this can't accidentally deliver to the
+	// wrong client's callback.
 	CreateDelivery(context.Context, string, []byte) (Delivery, error)
 	// ClaimNextDelivery mirrors ClaimNextQueued's claim-with-lease shape:
 	// atomically picks the oldest due pending delivery and marks it

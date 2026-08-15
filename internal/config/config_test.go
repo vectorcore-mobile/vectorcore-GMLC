@@ -8,7 +8,7 @@ import (
 )
 
 func validDiameter(peers string) string {
-	return `server: {listen_address: "127.0.0.1:1"}
+	return `mlp: {listen_address: "127.0.0.1:9210"}
 database: {path: "/tmp/gmlc.db", checkpoint_pages: 1}
 retention: {request: "1h", result: "1h"}
 logging: {file: "/tmp/gmlc.log", level: "info"}
@@ -61,25 +61,14 @@ func TestDiameterPeerConfiguration(t *testing.T) {
 		t.Error("empty peers accepted")
 	}
 }
-func TestMLPConfigDisabledByDefaultNeedsNoListenAddress(t *testing.T) {
-	if err := loadText(t, validDiameter("    - {name: a, address: 'a:1', transport: tcp}\n")); err != nil {
-		t.Fatalf("mlp disabled by default should not require listen_address: %v", err)
-	}
-}
-func TestMLPConfigRequiresListenAddressWhenEnabled(t *testing.T) {
-	text := validDiameter("    - {name: a, address: 'a:1', transport: tcp}\n") + "mlp: {enabled: true}\n"
+func TestMLPConfigRequiresListenAddress(t *testing.T) {
+	text := strings.Replace(validDiameter("    - {name: a, address: 'a:1', transport: tcp}\n"), `mlp: {listen_address: "127.0.0.1:9210"}`+"\n", "", 1)
 	if err := loadText(t, text); err == nil {
-		t.Error("mlp.enabled without listen_address accepted")
+		t.Error("missing mlp.listen_address accepted")
 	}
 }
-func TestMLPConfigRejectsSameListenAddressAsServer(t *testing.T) {
-	text := validDiameter("    - {name: a, address: 'a:1', transport: tcp}\n") + `mlp: {enabled: true, listen_address: "127.0.0.1:1"}` + "\n"
-	if err := loadText(t, text); err == nil {
-		t.Error("mlp.listen_address colliding with server.listen_address accepted")
-	}
-}
-func TestMLPConfigValidWhenEnabledWithDistinctPort(t *testing.T) {
-	text := validDiameter("    - {name: a, address: 'a:1', transport: tcp}\n") + `mlp: {enabled: true, listen_address: "127.0.0.1:9210"}` + "\n"
+func TestMLPConfigValidWithListenAddress(t *testing.T) {
+	text := validDiameter("    - {name: a, address: 'a:1', transport: tcp}\n")
 	c, err := func() (Config, error) {
 		p := filepath.Join(t.TempDir(), "gmlc.yaml")
 		if err := os.WriteFile(p, []byte(text), 0600); err != nil {
@@ -90,27 +79,11 @@ func TestMLPConfigValidWhenEnabledWithDistinctPort(t *testing.T) {
 	if err != nil {
 		t.Fatalf("valid mlp config rejected: %v", err)
 	}
-	if !c.MLP.Enabled || c.MLP.ListenAddress != "127.0.0.1:9210" {
+	if c.MLP.ListenAddress != "127.0.0.1:9210" {
 		t.Fatalf("mlp config not parsed: %#v", c.MLP)
 	}
 	if c.MLP.SyncWaitTimeout <= 0 || c.MLP.MaxSyncWaitTimeout <= 0 || c.MLP.ShutdownTimeout <= 0 {
 		t.Fatalf("mlp defaults not applied: %#v", c.MLP)
-	}
-	if c.Server.Enabled == nil || !*c.Server.Enabled {
-		t.Fatalf("server.enabled should default to true, got %#v", c.Server.Enabled)
-	}
-}
-func TestServerCanBeDisabledIfMLPEnabled(t *testing.T) {
-	text := validDiameter("    - {name: a, address: 'a:1', transport: tcp}\n") + "server: {enabled: false}\n" + `mlp: {enabled: true, listen_address: "127.0.0.1:9210"}` + "\n"
-	text = strings.Replace(text, `server: {listen_address: "127.0.0.1:1"}`+"\n", "", 1)
-	if err := loadText(t, text); err != nil {
-		t.Fatalf("server disabled with mlp enabled should be valid: %v", err)
-	}
-}
-func TestBothServerAndMLPDisabledIsInvalid(t *testing.T) {
-	text := strings.Replace(validDiameter("    - {name: a, address: 'a:1', transport: tcp}\n"), `server: {listen_address: "127.0.0.1:1"}`, "server: {enabled: false}", 1)
-	if err := loadText(t, text); err == nil {
-		t.Error("server and mlp both disabled accepted")
 	}
 }
 func TestMLPReportingDisabledByDefaultNeedsNoURLs(t *testing.T) {

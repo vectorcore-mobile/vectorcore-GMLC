@@ -17,9 +17,9 @@ import (
 	"github.com/vectorcore/gmlc/internal/storage/sqlite"
 )
 
-// newTestHandler mirrors internal/httpapi/api_test.go's setup pattern (real
-// sqlite in t.TempDir(), one bootstrapped client) but with a fast poll
-// interval so sync-wait tests don't take real seconds.
+// newTestHandler sets up a real sqlite store in t.TempDir() with one
+// bootstrapped client, using a fast poll interval so sync-wait tests don't
+// take real seconds.
 func newTestHandler(t *testing.T, defaultWait, maxWait time.Duration) (*Handler, *sqlite.Store) {
 	t.Helper()
 	ctx := context.Background()
