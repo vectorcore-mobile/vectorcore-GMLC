@@ -33,9 +33,7 @@ SQLite and driven to completion by a background worker, so results survive a res
 - **Per-client authorization** — bearer-token auth, timing-safe credential checks, and
   per-client target-prefix/service-type scoping, with operator-only LCS-Client-Type and
   LCS-Privacy-Check controls.
-- **Operational tooling** — file-based logging with an optional debug console sink,
-  `/healthz`/`/readyz` endpoints, and native Go fuzz targets for GAD, SLh, and SLg decoding
-  (`make fuzz-smoke`).
+- **Operational tooling** — file-based logging with an optional debug console sink
 
 ## Building
 
